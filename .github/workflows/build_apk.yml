@@ -1,0 +1,117 @@
+name: Flutter Build Bot - ZIP to APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_filename:
+        description: Nama file ZIP yang akan di-build
+        required: true
+        default: project.zip
+  push:
+    branches: [main, master]
+    paths: ['**.zip']
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Flutter APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: stable
+          cache: true
+
+      - name: Tentukan ZIP Target
+        id: zipfile
+        run: |
+          if [ -n "${{ github.event.inputs.zip_filename }}" ]; then
+            ZIP_NAME="${{ github.event.inputs.zip_filename }}"
+          elif ls *.zip 1>/dev/null 2>&1; then
+            ZIP_NAME=$(ls *.zip | head -1)
+          else
+            echo "Tidak ada ZIP ditemukan!"; exit 1
+          fi
+          echo "zip_name=${ZIP_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Extract dan Validasi ZIP Flutter
+        run: |
+          ZIP="${{ steps.zipfile.outputs.zip_name }}"
+          [ ! -f "$ZIP" ] && echo "File $ZIP tidak ditemukan!" && exit 1
+          unzip -o "$ZIP" -d extracted/
+          PUBSPEC=$(find extracted/ -name "pubspec.yaml" | head -1)
+          [ -z "$PUBSPEC" ] && echo "pubspec.yaml tidak ditemukan!" && exit 1
+          PROJECT_DIR=$(dirname "$PUBSPEC")
+          cp -r "$PROJECT_DIR"/. .
+          rm -rf extracted/
+
+      - name: Cache Flutter Pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            .dart_tool
+          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: ${{ runner.os }}-pub-
+
+      - name: Flutter Pub Get
+        run: flutter pub get
+
+      - name: Build APK Release
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: Rename APK
+        id: apk
+        run: |
+          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          APK_NAME="flutter-release-${TIMESTAMP}-${SHORT_SHA}.apk"
+          mv build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/${APK_NAME}"
+          APK_SIZE=$(du -sh "build/app/outputs/flutter-apk/${APK_NAME}" | cut -f1)
+          echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
+          echo "apk_size=${APK_SIZE}" >> $GITHUB_OUTPUT
+
+      - name: Generate Release Tag
+        id: tag
+        run: |
+          TAG="v$(date +'%Y.%m.%d')-$(echo '${{ github.sha }}' | cut -c1-7)"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Upload ke GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Build ${{ steps.tag.outputs.tag }}"
+          body: |
+            Build otomatis dari Telegram Bot
+            ZIP: ${{ steps.zipfile.outputs.zip_name }}
+            APK: ${{ steps.apk.outputs.apk_name }}
+            Size: ${{ steps.apk.outputs.apk_size }}
+            SHA: ${{ github.sha }}
+          files: build/app/outputs/flutter-apk/${{ steps.apk.outputs.apk_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Actions Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: APK-${{ steps.tag.outputs.tag }}
+          path: build/app/outputs/flutter-apk/${{ steps.apk.outputs.apk_name }}
+          retention-days: 14
