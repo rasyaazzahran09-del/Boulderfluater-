@@ -5,20 +5,24 @@ on:
     inputs:
       zip_filename:
         description: Nama file ZIP yang akan di-build
-        required: true
+        required: false
         default: project.zip
   push:
     branches: [main, master]
-    paths: ['**.zip']
+    paths:
+      - '**.zip'
 
 permissions:
   contents: write
+
+env:
+  FLUTTER_CHANNEL: stable
 
 jobs:
   build-apk:
     name: Build Flutter APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout Repository
@@ -35,64 +39,122 @@ jobs:
       - name: Setup Flutter SDK
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'
-          channel: stable
+          channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
 
       - name: Tentukan ZIP Target
         id: zipfile
+        shell: bash
         run: |
-          if [ -n "${{ github.event.inputs.zip_filename }}" ]; then
-            ZIP_NAME="${{ github.event.inputs.zip_filename }}"
-          elif ls *.zip 1>/dev/null 2>&1; then
-            ZIP_NAME=$(ls *.zip | head -1)
+          set -e
+          INPUT_ZIP="${{ github.event.inputs.zip_filename }}"
+          if [ -n "$INPUT_ZIP" ] && [ -f "$INPUT_ZIP" ]; then
+            ZIP_NAME="$INPUT_ZIP"
+          elif ls -t *.zip >/dev/null 2>&1; then
+            ZIP_NAME="$(ls -t *.zip | head -1)"
           else
-            echo "Tidak ada ZIP ditemukan!"; exit 1
+            echo "Tidak ada ZIP ditemukan di root repository!"
+            echo "Upload ZIP project Flutter ke repository, lalu jalankan ulang workflow."
+            exit 1
           fi
-          echo "zip_name=${ZIP_NAME}" >> $GITHUB_OUTPUT
+          echo "ZIP dipakai: $ZIP_NAME"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Extract dan Validasi ZIP Flutter
+        shell: bash
         run: |
+          set -e
           ZIP="${{ steps.zipfile.outputs.zip_name }}"
-          [ ! -f "$ZIP" ] && echo "File $ZIP tidak ditemukan!" && exit 1
-          unzip -o "$ZIP" -d extracted/
-          PUBSPEC=$(find extracted/ -name "pubspec.yaml" | head -1)
-          [ -z "$PUBSPEC" ] && echo "pubspec.yaml tidak ditemukan!" && exit 1
-          PROJECT_DIR=$(dirname "$PUBSPEC")
-          cp -r "$PROJECT_DIR"/. .
-          rm -rf extracted/
+          WORK_DIR="$GITHUB_WORKSPACE/build_workspace"
+          EXTRACT_DIR="$WORK_DIR/extracted"
+          PROJECT_COPY="$WORK_DIR/project"
+
+          rm -rf "$WORK_DIR"
+          mkdir -p "$EXTRACT_DIR" "$PROJECT_COPY"
+          unzip -q -o "$ZIP" -d "$EXTRACT_DIR"
+
+          PUBSPEC="$(find "$EXTRACT_DIR" -type f -name "pubspec.yaml" | head -1)"
+          if [ -z "$PUBSPEC" ]; then
+            echo "pubspec.yaml tidak ditemukan di dalam ZIP."
+            echo "Pastikan ZIP berisi project Flutter, bukan hanya README atau file kosong."
+            echo "Isi ZIP yang terbaca:"
+            find "$EXTRACT_DIR" -maxdepth 2 -mindepth 1 -printf '%P
+' | head -80
+            exit 1
+          fi
+
+          PROJECT_DIR_SRC="$(dirname "$PUBSPEC")"
+          cp -a "$PROJECT_DIR_SRC/." "$PROJECT_COPY/"
+          echo "PROJECT_DIR=$PROJECT_COPY" >> "$GITHUB_ENV"
+          echo "Project Flutter ditemukan di: $PROJECT_DIR_SRC"
 
       - name: Cache Flutter Pub
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
-            .dart_tool
-          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
+          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.yaml') }}
           restore-keys: ${{ runner.os }}-pub-
 
       - name: Flutter Pub Get
-        run: flutter pub get
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          flutter --version
+          dart --version
+          flutter config --no-analytics
+          rm -rf .dart_tool build
+
+          if [ -f pubspec.lock ]; then
+            echo "Mencoba flutter pub get dengan pubspec.lock..."
+            if ! flutter pub get; then
+              echo "flutter pub get gagal. Menghapus pubspec.lock lalu mencoba ulang..."
+              rm -f pubspec.lock
+              flutter pub get
+            fi
+          else
+            flutter pub get
+          fi
+
+      - name: Setup Android SDK Licenses
+        shell: bash
+        run: |
+          set +e
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          yes | sdkmanager --licenses >/dev/null 2>&1
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null 2>&1
+          exit 0
 
       - name: Build APK Release
-        run: flutter build apk --release --no-tree-shake-icons
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          flutter build apk --release --no-tree-shake-icons
 
       - name: Rename APK
         id: apk
+        shell: bash
         run: |
-          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          set -e
+          APK_DIR="$PROJECT_DIR/build/app/outputs/flutter-apk"
+          TIMESTAMP="$(date +'%Y%m%d-%H%M%S')"
+          SHORT_SHA="$(echo "${{ github.sha }}" | cut -c1-7)"
           APK_NAME="flutter-release-${TIMESTAMP}-${SHORT_SHA}.apk"
-          mv build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/${APK_NAME}"
-          APK_SIZE=$(du -sh "build/app/outputs/flutter-apk/${APK_NAME}" | cut -f1)
-          echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
-          echo "apk_size=${APK_SIZE}" >> $GITHUB_OUTPUT
+          mv "$APK_DIR/app-release.apk" "$APK_DIR/$APK_NAME"
+          APK_SIZE="$(du -sh "$APK_DIR/$APK_NAME" | cut -f1)"
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "apk_path=$APK_DIR/$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "apk_size=$APK_SIZE" >> "$GITHUB_OUTPUT"
 
       - name: Generate Release Tag
         id: tag
+        shell: bash
         run: |
-          TAG="v$(date +'%Y.%m.%d')-$(echo '${{ github.sha }}' | cut -c1-7)"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          TAG="v$(date +'%Y.%m.%d-%H%M%S')-$(echo '${{ github.sha }}' | cut -c1-7)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Upload ke GitHub Release
         uses: softprops/action-gh-release@v2
@@ -105,7 +167,7 @@ jobs:
             APK: ${{ steps.apk.outputs.apk_name }}
             Size: ${{ steps.apk.outputs.apk_size }}
             SHA: ${{ github.sha }}
-          files: build/app/outputs/flutter-apk/${{ steps.apk.outputs.apk_name }}
+          files: ${{ steps.apk.outputs.apk_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -113,5 +175,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: APK-${{ steps.tag.outputs.tag }}
-          path: build/app/outputs/flutter-apk/${{ steps.apk.outputs.apk_name }}
+          path: ${{ steps.apk.outputs.apk_path }}
           retention-days: 14
