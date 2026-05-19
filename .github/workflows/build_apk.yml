@@ -1,6 +1,6 @@
 name: Flutter Build Bot - ZIP to APK
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       zip_filename:
@@ -8,9 +8,11 @@ on:
         required: false
         default: project.zip
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
     paths:
-      - '**.zip'
+      - "**.zip"
 
 permissions:
   contents: write
@@ -34,12 +36,12 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Setup Flutter SDK
         uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          channel: "${{ env.FLUTTER_CHANNEL }}"
           cache: true
 
       - name: Tentukan ZIP Target
@@ -78,8 +80,7 @@ jobs:
             echo "pubspec.yaml tidak ditemukan di dalam ZIP."
             echo "Pastikan ZIP berisi project Flutter, bukan hanya README atau file kosong."
             echo "Isi ZIP yang terbaca:"
-            find "$EXTRACT_DIR" -maxdepth 2 -mindepth 1 -printf '%P
-' | head -80
+            find "$EXTRACT_DIR" -maxdepth 2 -mindepth 1 -printf '%P\n' | head -80
             exit 1
           fi
 
@@ -93,8 +94,9 @@ jobs:
         with:
           path: |
             ~/.pub-cache
-          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.yaml') }}
-          restore-keys: ${{ runner.os }}-pub-
+          key: "${{ runner.os }}-pub-${{ hashFiles('**/pubspec.yaml') }}"
+          restore-keys: |
+            ${{ runner.os }}-pub-
 
       - name: Flutter Pub Get
         shell: bash
@@ -159,7 +161,7 @@ jobs:
       - name: Upload ke GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
+          tag_name: "${{ steps.tag.outputs.tag }}"
           name: "Build ${{ steps.tag.outputs.tag }}"
           body: |
             Build otomatis dari Telegram Bot
@@ -167,13 +169,13 @@ jobs:
             APK: ${{ steps.apk.outputs.apk_name }}
             Size: ${{ steps.apk.outputs.apk_size }}
             SHA: ${{ github.sha }}
-          files: ${{ steps.apk.outputs.apk_path }}
+          files: "${{ steps.apk.outputs.apk_path }}"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Upload Actions Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: APK-${{ steps.tag.outputs.tag }}
-          path: ${{ steps.apk.outputs.apk_path }}
+          name: "APK-${{ steps.tag.outputs.tag }}"
+          path: "${{ steps.apk.outputs.apk_path }}"
           retention-days: 14
