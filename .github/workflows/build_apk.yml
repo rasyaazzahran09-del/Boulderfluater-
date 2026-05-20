@@ -1,19 +1,17 @@
 name: Flutter Build Bot - ZIP to APK
+run-name: "Build APK ${{ inputs.build_id || github.run_id }}"
 
 "on":
   workflow_dispatch:
     inputs:
       zip_filename:
         description: Nama file ZIP yang akan di-build
-        required: false
+        required: true
         default: project.zip
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - "**.zip"
-
+      build_id:
+        description: ID unik build dari bot Telegram
+        required: true
+        default: manual-build
 permissions:
   contents: write
 
@@ -50,17 +48,18 @@ jobs:
         run: |
           set -e
           INPUT_ZIP="${{ github.event.inputs.zip_filename }}"
-          if [ -n "$INPUT_ZIP" ] && [ -f "$INPUT_ZIP" ]; then
-            ZIP_NAME="$INPUT_ZIP"
-          elif ls -t *.zip >/dev/null 2>&1; then
-            ZIP_NAME="$(ls -t *.zip | head -1)"
-          else
-            echo "Tidak ada ZIP ditemukan di root repository!"
-            echo "Upload ZIP project Flutter ke repository, lalu jalankan ulang workflow."
+          BUILD_ID="${{ github.event.inputs.build_id }}"
+          if [ -z "$INPUT_ZIP" ] || [ ! -f "$INPUT_ZIP" ]; then
+            echo "ZIP target tidak ditemukan: $INPUT_ZIP"
+            echo "Build ID: $BUILD_ID"
+            echo "Pastikan file ZIP dari bot sudah ter-upload sebelum workflow dipicu."
             exit 1
           fi
+          ZIP_NAME="$INPUT_ZIP"
           echo "ZIP dipakai: $ZIP_NAME"
+          echo "Build ID: $BUILD_ID"
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
 
       - name: Extract dan Validasi ZIP Flutter
         shell: bash
@@ -142,9 +141,8 @@ jobs:
         run: |
           set -e
           APK_DIR="$PROJECT_DIR/build/app/outputs/flutter-apk"
-          TIMESTAMP="$(date +'%Y%m%d-%H%M%S')"
-          SHORT_SHA="$(echo "${{ github.sha }}" | cut -c1-7)"
-          APK_NAME="flutter-release-${TIMESTAMP}-${SHORT_SHA}.apk"
+          BUILD_ID="${{ steps.zipfile.outputs.build_id }}"
+          APK_NAME="flutter-release-${BUILD_ID}.apk"
           mv "$APK_DIR/app-release.apk" "$APK_DIR/$APK_NAME"
           APK_SIZE="$(du -sh "$APK_DIR/$APK_NAME" | cut -f1)"
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
@@ -155,10 +153,10 @@ jobs:
         id: tag
         shell: bash
         run: |
-          TAG="v$(date +'%Y.%m.%d-%H%M%S')-$(echo '${{ github.sha }}' | cut -c1-7)"
+          TAG="build-${{ steps.zipfile.outputs.build_id }}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Upload ke GitHub Release
+      - name: Upload ke hasil build
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ steps.tag.outputs.tag }}"
@@ -176,6 +174,6 @@ jobs:
       - name: Upload Actions Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "APK-${{ steps.tag.outputs.tag }}"
+          name: "APK-${{ steps.zipfile.outputs.build_id }}"
           path: "${{ steps.apk.outputs.apk_path }}"
           retention-days: 14
