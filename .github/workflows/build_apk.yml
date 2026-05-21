@@ -1,4 +1,4 @@
-name: Flutter Build Bot - ZIP to APK
+name: Flutter/Godot Build Bot - ZIP to APK
 run-name: "Build APK ${{ inputs.build_id || github.run_id }}"
 
 "on":
@@ -17,10 +17,13 @@ permissions:
 
 env:
   FLUTTER_CHANNEL: stable
+  FLUTTER_VERSION: 3.35.5
+  GODOT_VERSION: "4.3"
+  GODOT_STATUS: stable
 
 jobs:
   build-apk:
-    name: Build Flutter APK
+    name: Build APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -40,7 +43,20 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: "${{ env.FLUTTER_CHANNEL }}"
+          flutter-version: "${{ env.FLUTTER_VERSION }}"
           cache: true
+
+      - name: Setup Android SDK Licenses
+        shell: bash
+        run: |
+          set +e
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          yes | sdkmanager --licenses >/dev/null 2>&1
+          sdkmanager "platform-tools" \
+                     "platforms;android-35" "build-tools;35.0.0" \
+                     "platforms;android-36" "build-tools;36.0.0" >/dev/null 2>&1
+          exit 0
 
       - name: Tentukan ZIP Target
         id: zipfile
@@ -61,7 +77,7 @@ jobs:
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
           echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Extract dan Validasi ZIP Flutter
+      - name: Extract dan Validasi ZIP Flutter/Godot
         shell: bash
         run: |
           set -e
@@ -75,18 +91,28 @@ jobs:
           unzip -q -o "$ZIP" -d "$EXTRACT_DIR"
 
           PUBSPEC="$(find "$EXTRACT_DIR" -type f -name "pubspec.yaml" | head -1)"
-          if [ -z "$PUBSPEC" ]; then
-            echo "pubspec.yaml tidak ditemukan di dalam ZIP."
-            echo "Pastikan ZIP berisi project Flutter, bukan hanya README atau file kosong."
+          GODOT_PROJECT="$(find "$EXTRACT_DIR" -type f -name "project.godot" | head -1)"
+
+          if [ -n "$PUBSPEC" ]; then
+            PROJECT_DIR_SRC="$(dirname "$PUBSPEC")"
+            PROJECT_TYPE="flutter"
+            echo "Project Flutter ditemukan di: $PROJECT_DIR_SRC"
+          elif [ -n "$GODOT_PROJECT" ]; then
+            PROJECT_DIR_SRC="$(dirname "$GODOT_PROJECT")"
+            PROJECT_TYPE="godot"
+            echo "Project Godot ditemukan di: $PROJECT_DIR_SRC"
+          else
+            echo "pubspec.yaml atau project.godot tidak ditemukan di dalam ZIP."
+            echo "Pastikan ZIP berisi project Flutter atau Godot, bukan hanya README atau file kosong."
             echo "Isi ZIP yang terbaca:"
-            find "$EXTRACT_DIR" -maxdepth 2 -mindepth 1 -printf '%P\n' | head -80
+            find "$EXTRACT_DIR" -maxdepth 3 -mindepth 1 -printf '%P\n' | head -120
             exit 1
           fi
 
-          PROJECT_DIR_SRC="$(dirname "$PUBSPEC")"
           cp -a "$PROJECT_DIR_SRC/." "$PROJECT_COPY/"
           echo "PROJECT_DIR=$PROJECT_COPY" >> "$GITHUB_ENV"
-          echo "Project Flutter ditemukan di: $PROJECT_DIR_SRC"
+          echo "PROJECT_TYPE=$PROJECT_TYPE" >> "$GITHUB_ENV"
+          echo "PROJECT_TYPE=$PROJECT_TYPE" >> "$GITHUB_OUTPUT"
 
       - name: Cache Flutter Pub
         uses: actions/cache@v4
@@ -97,10 +123,33 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pub-
 
+      - name: Auto-patch Android build files
+        shell: bash
+        run: |
+          set -e
+          if [ "$PROJECT_TYPE" != "flutter" ]; then
+            echo "Bukan project Flutter, skip patch Gradle Flutter."
+            exit 0
+          fi
+          cd "$PROJECT_DIR"
+          patch_gradle_file() {
+            local f="$1"
+            [ -f "$f" ] || return 0
+            echo "Patching $f"
+            sed -i -E 's/(compileSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.compileSdkVersion|[0-9]+)/\136/g' "$f"
+            sed -i -E 's/(targetSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.targetSdkVersion|[0-9]+)/\136/g' "$f"
+          }
+          patch_gradle_file "android/app/build.gradle.kts"
+          patch_gradle_file "android/app/build.gradle"
+
       - name: Flutter Pub Get
         shell: bash
         run: |
           set -e
+          if [ "$PROJECT_TYPE" != "flutter" ]; then
+            echo "Bukan project Flutter, skip flutter pub get."
+            exit 0
+          fi
           cd "$PROJECT_DIR"
           flutter --version
           dart --version
@@ -118,35 +167,121 @@ jobs:
             flutter pub get
           fi
 
-      - name: Setup Android SDK Licenses
-        shell: bash
-        run: |
-          set +e
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          yes | sdkmanager --licenses >/dev/null 2>&1
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null 2>&1
-          exit 0
-
-      - name: Build APK Release
+      - name: Build Flutter APK Release
         shell: bash
         run: |
           set -e
+          if [ "$PROJECT_TYPE" != "flutter" ]; then
+            echo "Bukan project Flutter, skip build Flutter."
+            exit 0
+          fi
           cd "$PROJECT_DIR"
           flutter build apk --release --no-tree-shake-icons
+
+      - name: Setup Godot Android Export
+        shell: bash
+        run: |
+          set -e
+          if [ "$PROJECT_TYPE" != "godot" ]; then
+            echo "Bukan project Godot, skip setup Godot."
+            exit 0
+          fi
+
+          GODOT_TAG="${GODOT_VERSION}-${GODOT_STATUS}"
+          GODOT_BIN_ZIP="Godot_v${GODOT_TAG}_linux.x86_64.zip"
+          GODOT_TPL_ZIP="Godot_v${GODOT_TAG}_export_templates.tpz"
+          GODOT_URL="https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${GODOT_BIN_ZIP}"
+          TPL_URL="https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${GODOT_TPL_ZIP}"
+
+          mkdir -p "$GITHUB_WORKSPACE/godot-bin" "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}"
+          wget -q "$GODOT_URL" -O /tmp/godot.zip
+          unzip -q -o /tmp/godot.zip -d "$GITHUB_WORKSPACE/godot-bin"
+          GODOT_EXE="$(find "$GITHUB_WORKSPACE/godot-bin" -type f -name 'Godot_v*_linux.x86_64' | head -1)"
+          chmod +x "$GODOT_EXE"
+          echo "GODOT_EXE=$GODOT_EXE" >> "$GITHUB_ENV"
+
+          wget -q "$TPL_URL" -O /tmp/godot_templates.tpz
+          rm -rf /tmp/godot_templates
+          mkdir -p /tmp/godot_templates
+          unzip -q -o /tmp/godot_templates.tpz -d /tmp/godot_templates
+          cp -a /tmp/godot_templates/templates/. "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}/"
+
+      - name: Build Godot APK
+        shell: bash
+        run: |
+          set -e
+          if [ "$PROJECT_TYPE" != "godot" ]; then
+            echo "Bukan project Godot, skip build Godot."
+            exit 0
+          fi
+          cd "$PROJECT_DIR"
+          mkdir -p build/android
+
+          if [ ! -f export_presets.cfg ]; then
+            APP_NAME="$(basename "$PROJECT_DIR" | tr -cd '[:alnum:] _-' | sed 's/  */ /g')"
+            [ -n "$APP_NAME" ] || APP_NAME="Godot App"
+            PACKAGE_SAFE="$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9' | cut -c1-24)"
+            [ -n "$PACKAGE_SAFE" ] || PACKAGE_SAFE="godotapp"
+            printf '%s\n' \
+              '[preset.0]' \
+              'name="Android"' \
+              'platform="Android"' \
+              'runnable=true' \
+              'dedicated_server=false' \
+              'custom_features=""' \
+              'export_filter="all_resources"' \
+              'include_filter=""' \
+              'exclude_filter=""' \
+              'export_path="build/android/godot-debug.apk"' \
+              'encryption_include_filters=""' \
+              'encryption_exclude_filters=""' \
+              'encrypt_pck=false' \
+              'encrypt_directory=false' \
+              '' \
+              '[preset.0.options]' \
+              'gradle_build/use_gradle_build=false' \
+              "package/unique_name=\"com.autobuild.${PACKAGE_SAFE}\"" \
+              "package/name=\"${APP_NAME}\"" \
+              'package/signed=true' \
+              'screen/immersive_mode=true' \
+              'architectures/armeabi-v7a=true' \
+              'architectures/arm64-v8a=true' \
+              'architectures/x86=false' \
+              'architectures/x86_64=false' \
+              > export_presets.cfg
+          fi
+
+          "$GODOT_EXE" --headless --path "$PROJECT_DIR" --editor --quit || true
+          "$GODOT_EXE" --headless --path "$PROJECT_DIR" --export-debug "Android" "build/android/godot-debug.apk"
 
       - name: Rename APK
         id: apk
         shell: bash
         run: |
           set -e
-          APK_DIR="$PROJECT_DIR/build/app/outputs/flutter-apk"
           BUILD_ID="${{ steps.zipfile.outputs.build_id }}"
-          APK_NAME="flutter-release-${BUILD_ID}.apk"
-          mv "$APK_DIR/app-release.apk" "$APK_DIR/$APK_NAME"
-          APK_SIZE="$(du -sh "$APK_DIR/$APK_NAME" | cut -f1)"
+          if [ "$PROJECT_TYPE" = "flutter" ]; then
+            APK_DIR="$PROJECT_DIR/build/app/outputs/flutter-apk"
+            APK_NAME="flutter-release-${BUILD_ID}.apk"
+            mv "$APK_DIR/app-release.apk" "$APK_DIR/$APK_NAME"
+            APK_PATH="$APK_DIR/$APK_NAME"
+          elif [ "$PROJECT_TYPE" = "godot" ]; then
+            APK_DIR="$PROJECT_DIR/build/android"
+            APK_NAME="godot-debug-${BUILD_ID}.apk"
+            APK_PATH="$APK_DIR/$APK_NAME"
+            SRC_APK="$(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' | head -1)"
+            if [ -z "$SRC_APK" ]; then
+              echo "APK Godot tidak ditemukan di $APK_DIR"
+              exit 1
+            fi
+            mv "$SRC_APK" "$APK_PATH"
+          else
+            echo "PROJECT_TYPE tidak dikenal: $PROJECT_TYPE"
+            exit 1
+          fi
+          APK_SIZE="$(du -sh "$APK_PATH" | cut -f1)"
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
-          echo "apk_path=$APK_DIR/$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
           echo "apk_size=$APK_SIZE" >> "$GITHUB_OUTPUT"
 
       - name: Generate Release Tag
@@ -156,13 +291,14 @@ jobs:
           TAG="build-${{ steps.zipfile.outputs.build_id }}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Upload ke hasil build
+      - name: Upload ke GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ steps.tag.outputs.tag }}"
           name: "Build ${{ steps.tag.outputs.tag }}"
           body: |
             Build otomatis dari Telegram Bot
+            Type: ${{ env.PROJECT_TYPE }}
             ZIP: ${{ steps.zipfile.outputs.zip_name }}
             APK: ${{ steps.apk.outputs.apk_name }}
             Size: ${{ steps.apk.outputs.apk_size }}
