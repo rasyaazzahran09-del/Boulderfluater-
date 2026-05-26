@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.log
+logs/
+local_bot_api_data/
+backups/
+*.session
+bot_config.json
+web_panel_users.json
