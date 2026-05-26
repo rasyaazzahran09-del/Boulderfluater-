@@ -1,0 +1,26 @@
+CARA LOGIN USERBOT LEWAT PANEL
+==============================
+
+Pilihan 1 (paling mudah):
+1. Buka Console/Terminal panel server.
+2. Jalankan:
+   npm run userbot:login
+3. Masukkan nomor Telegram userbot, contoh +628xxxx.
+4. Masukkan kode Telegram yang masuk ke akun tersebut.
+5. Kalau akun memakai 2FA, masukkan password 2FA.
+6. Session akan otomatis tersimpan ke .env sebagai USERBOT_STRING_SESSION.
+7. Jalankan bot seperti biasa:
+   npm start
+
+Pilihan 2 (otomatis saat startup):
+1. Isi .env:
+   USERBOT_PHONE=+628xxxx
+   USERBOT_PANEL_LOGIN=true
+2. Restart server / npm start.
+3. Bot akan meminta kode Telegram di Console/Panel server.
+4. Setelah sukses, USERBOT_STRING_SESSION otomatis disimpan dan USERBOT_PANEL_LOGIN diubah ke false.
+
+Catatan penting:
+- USERBOT_API_ID dan USERBOT_API_HASH wajib terisi.
+- Akun userbot dipakai untuk mengirim APK sebagai file, bukan link.
+- Supaya userbot bisa DM penerima, lebih aman akun penerima pernah chat dengan akun userbot atau userbot punya akses ke dialognya.
