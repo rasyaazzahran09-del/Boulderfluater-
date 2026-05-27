@@ -13,7 +13,7 @@ run-name: "Build APK ${{ inputs.build_id || github.run_id }}"
         required: true
         default: manual-build
       flutter_version:
-        description: "Versi Flutter: auto / stable / beta / master / 3.35.5 / 3.32.0 / 3.27.4 / 3.24.5 / 3.22.3 / 3.19.6 / 3.16.9 / 3.13.9 / 3.10.6 / 3.7.12 / 3.3.10 / 3.0.5 / 2.10.5 / 1.22.6"
+        description: "Versi Flutter: auto / stable / beta / 3.35.5 / 3.32.0 / 3.27.4 / 3.24.5 / 3.22.3"
         required: false
         default: auto
 
@@ -22,18 +22,15 @@ permissions:
 
 env:
   FLUTTER_CHANNEL: stable
-  DEFAULT_FLUTTER_VERSION: 3.35.5
+  DEFAULT_FLUTTER_VERSION: 3.32.0
 
 jobs:
   build-apk:
     name: Build Flutter APK
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 40
 
     steps:
-      # ════════════════════════════════════════════════════════
-      # 1. CHECKOUT
-      # ════════════════════════════════════════════════════════
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -48,6 +45,7 @@ jobs:
           BUILD_ID="${{ github.event.inputs.build_id }}"
           if [ -z "$INPUT_ZIP" ] || [ ! -f "$INPUT_ZIP" ]; then
             echo "ZIP target tidak ditemukan: $INPUT_ZIP"
+            ls -la
             exit 1
           fi
           echo "zip_name=$INPUT_ZIP" >> "$GITHUB_OUTPUT"
@@ -70,7 +68,7 @@ jobs:
           PUBSPEC="$(find "$EXTRACT_DIR" -type f -name "pubspec.yaml" | head -1)"
           if [ -z "$PUBSPEC" ]; then
             echo "ERROR: pubspec.yaml tidak ditemukan di dalam ZIP."
-            find "$EXTRACT_DIR" -maxdepth 3 -mindepth 1 -printf '%P\n' | head -80
+            find "$EXTRACT_DIR" -maxdepth 4 -printf '%P\n' | head -80
             exit 1
           fi
 
@@ -79,9 +77,6 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_COPY" >> "$GITHUB_ENV"
           echo "Project Flutter ditemukan di: $PROJECT_DIR_SRC"
 
-      # ════════════════════════════════════════════════════════
-      # 2. DETEKSI VERSI FLUTTER & JAVA (support semua versi)
-      # ════════════════════════════════════════════════════════
       - name: Deteksi Versi Flutter & Java
         id: flutterver
         shell: bash
@@ -92,75 +87,31 @@ jobs:
           VERSION="${DEFAULT_FLUTTER_VERSION}"
           CHANNEL="${FLUTTER_CHANNEL}"
 
-          # ── Prioritas deteksi ──────────────────────────────────────────────
-          # 1. Input manual dari bot / web
           if [ -n "$INPUT_VERSION" ] && [ "$INPUT_VERSION" != "auto" ]; then
             case "$INPUT_VERSION" in
               stable|beta|master|main)
                 CHANNEL="$INPUT_VERSION"
-                VERSION=""   # kosongkan, biar flutter-action pakai channel
+                VERSION=""
                 [ "$INPUT_VERSION" = "main" ] && CHANNEL="master"
                 ;;
               *)
                 VERSION="$INPUT_VERSION"
                 ;;
             esac
-          # 2. FVM config
           elif [ -f ".fvm/fvm_config.json" ]; then
             FVM_V="$(python3 -c "import json; d=json.load(open('.fvm/fvm_config.json')); print(d.get('flutterSdkVersion') or d.get('flutter') or '')" 2>/dev/null || true)"
             [ -n "$FVM_V" ] && VERSION="$FVM_V"
-          elif [ -f ".fvmrc" ]; then
-            FV="$(python3 -c "import json; d=json.load(open('.fvmrc')); print(d.get('flutter') or d.get('flutterSdkVersion') or '')" 2>/dev/null || cat .fvmrc | tr -d '[:space:]')"
-            [ -n "$FV" ] && VERSION="$FV"
-          # 3. .flutter-version file (asdf / fvm style)
           elif [ -f ".flutter-version" ]; then
             FV="$(cat .flutter-version | tr -d '[:space:]')"
             [ -n "$FV" ] && VERSION="$FV"
-          # 4. pubspec.yaml sdk constraint
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=1\." pubspec.yaml 2>/dev/null; then
-            VERSION="1.22.6"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=2\.0" pubspec.yaml 2>/dev/null; then
-            VERSION="2.10.5"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=2\.12" pubspec.yaml 2>/dev/null; then
-            VERSION="2.10.5"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=2\.17" pubspec.yaml 2>/dev/null; then
-            VERSION="3.0.5"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=2\.18" pubspec.yaml 2>/dev/null; then
-            VERSION="3.3.10"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=2\.19" pubspec.yaml 2>/dev/null; then
-            VERSION="3.7.12"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\.0" pubspec.yaml 2>/dev/null; then
-            VERSION="3.10.6"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\.1" pubspec.yaml 2>/dev/null; then
-            VERSION="3.13.9"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\.2" pubspec.yaml 2>/dev/null; then
-            VERSION="3.16.9"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\.3" pubspec.yaml 2>/dev/null; then
-            VERSION="3.19.6"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\.4" pubspec.yaml 2>/dev/null; then
-            VERSION="3.22.3"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\.5" pubspec.yaml 2>/dev/null; then
-            VERSION="3.24.5"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\.6" pubspec.yaml 2>/dev/null; then
-            VERSION="3.27.4"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\.7" pubspec.yaml 2>/dev/null; then
-            VERSION="3.32.0"
-          elif grep -Eq "sdk:[[:space:]]*['\"]>=3\." pubspec.yaml 2>/dev/null; then
-            VERSION="${DEFAULT_FLUTTER_VERSION}"
           fi
 
-          # ── Tentukan Java versi yg tepat ──────────────────────────────────
-          # Flutter <2.5  → Java 8
-          # Flutter 2.5-2.10 → Java 11
-          # Flutter 3.0-3.15 → Java 17
-          # Flutter 3.16+ → Java 17 (default modern)
           FLUTTER_MAJOR="$(echo "${VERSION:-3}" | cut -d. -f1)"
           FLUTTER_MINOR="$(echo "${VERSION:-3.0}" | cut -d. -f2)"
           FLUTTER_MAJOR="${FLUTTER_MAJOR:-3}"
           FLUTTER_MINOR="${FLUTTER_MINOR:-0}"
 
           if [ -z "$VERSION" ]; then
-            # channel-based (stable/beta/master) → asumsikan modern
             JAVA_VER="17"
           elif [ "$FLUTTER_MAJOR" -lt 2 ] 2>/dev/null; then
             JAVA_VER="8"
@@ -178,15 +129,15 @@ jobs:
           echo "flutter_major=$FLUTTER_MAJOR" >> "$GITHUB_OUTPUT"
           echo "FLUTTER_VERSION_RESOLVED=${VERSION:-channel-$CHANNEL}" >> "$GITHUB_ENV"
           echo "FLUTTER_MAJOR_RESOLVED=$FLUTTER_MAJOR" >> "$GITHUB_ENV"
-          echo "Versi Flutter: ${VERSION:-channel:$CHANNEL}  |  Java: $JAVA_VER  |  Major: $FLUTTER_MAJOR"
+          echo "Versi Flutter: ${VERSION:-channel:$CHANNEL}  |  Java: $JAVA_VER"
 
-      - name: Setup Java JDK (versi otomatis)
+      - name: Setup Java JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "${{ steps.flutterver.outputs.java_version }}"
 
-      - name: Setup Flutter SDK (versi/channel otomatis)
+      - name: Setup Flutter SDK
         uses: subosito/flutter-action@v2
         with:
           channel: "${{ steps.flutterver.outputs.flutter_channel }}"
@@ -202,9 +153,6 @@ jobs:
             ${{ runner.os }}-pub-${{ steps.flutterver.outputs.flutter_version }}-
             ${{ runner.os }}-pub-
 
-      # ════════════════════════════════════════════════════════
-      # 3. PATCH OTOMATIS — semua versi Flutter
-      # ════════════════════════════════════════════════════════
       - name: Auto Fix & Patch Build Files
         shell: bash
         env:
@@ -218,259 +166,106 @@ jobs:
 
           FLUTTER_MAJOR="${FLUTTER_MAJOR_RESOLVED:-3}"
 
-          # ── Fix typo Dart umum ───────────────────────────────────────────
+          # Fix typo Dart umum
           find lib -type f -name "*.dart" -print0 2>/dev/null | xargs -0 -r sed -i \
             -e 's/TextOverflowellipsis/TextOverflow.ellipsis/g' \
             -e 's/MainAxisAlignmentcenter/MainAxisAlignment.center/g' \
             -e 's/CrossAxisAlignmentcenter/CrossAxisAlignment.center/g' \
             -e 's/FontWeightbold/FontWeight.bold/g'
 
-          # ── Patch build.gradle & build.gradle.kts ───────────────────────
+          # Patch build.gradle & build.gradle.kts
           patch_gradle_file() {
             local f="$1"
             [ -f "$f" ] || return 0
             echo "Patching $f"
-
-            sed -i -E 's/(compileSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.compileSdkVersion|[0-9]+)/\136/g' "$f"
-            sed -i -E 's/(targetSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.targetSdkVersion|[0-9]+)/\136/g' "$f"
-            sed -i -E 's/(minSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.minSdkVersion|[0-9]+)/\123/g' "$f"
-
-            if grep -q 'ndkVersion' "$f"; then
-              sed -i -E 's|(ndkVersion[[:space:]]*=?[[:space:]]*")[^"]+(")|\128.2.13676358\2|g' "$f" || true
-            fi
-
+            sed -i -E 's/(compileSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.compileSdkVersion|[0-9]+)/\134/g' "$f"
+            sed -i -E 's/(targetSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.targetSdkVersion|[0-9]+)/\134/g' "$f"
+            sed -i -E 's/(minSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.minSdkVersion|[0-9]+)/\121/g' "$f"
             sed -i -E 's/JavaVersion\.VERSION_1_[678]/JavaVersion.VERSION_11/g' "$f"
           }
 
           patch_gradle_file "android/app/build.gradle.kts"
           patch_gradle_file "android/app/build.gradle"
 
-          # ── Patch android/build.gradle (root) — Kotlin gradle plugin ────
-          patch_root_gradle() {
-            local f="$1"
-            [ -f "$f" ] || return 0
-            sed -i -E "s/(ext\.kotlin_version[[:space:]]*=[[:space:]]*['\"])[0-9]+\.[0-9]+\.[0-9]+(['\"])/\11.9.0\2/g" "$f" || true
-          }
-          patch_root_gradle "android/build.gradle"
-          patch_root_gradle "android/build.gradle.kts"
-
-          # ── gradle.properties ────────────────────────────────────────────
-          GRADLE_PROPS="android/gradle.properties"
-          if [ ! -f "$GRADLE_PROPS" ]; then
-            mkdir -p android
-            touch "$GRADLE_PROPS"
-          fi
-          add_if_missing() {
-            grep -q "^$1" "$GRADLE_PROPS" || echo "$1" >> "$GRADLE_PROPS"
-          }
-          add_if_missing "android.useAndroidX=true"
-          add_if_missing "android.enableJetifier=true"
-          add_if_missing "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError"
-          add_if_missing "org.gradle.daemon=false"
-
-          # ── gradle-wrapper.properties — upgrade kalau terlalu lama ───────
-          WRAPPER_PROPS="android/gradle/wrapper/gradle-wrapper.properties"
-          if [ -f "$WRAPPER_PROPS" ]; then
-            CURRENT_GRADLE_URL="$(grep distributionUrl "$WRAPPER_PROPS" | grep -oP '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
-            CURRENT_MAJOR="$(echo "$CURRENT_GRADLE_URL" | cut -d. -f1)"
-            echo "Gradle versi saat ini: $CURRENT_GRADLE_URL"
-            if [ "${FLUTTER_MAJOR}" -ge 3 ] && [ "${CURRENT_MAJOR:-0}" -lt 8 ] 2>/dev/null; then
-              echo "Upgrade Gradle wrapper ke 8.10.2"
-              sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|g' "$WRAPPER_PROPS"
-            fi
-          fi
-
-          # ════════════════════════════════════════════════════════════════
-          # FIX UTAMA: Android Embedding v1 → v2
-          # Error: "Build failed due to use of deleted Android v1 embedding"
-          # Strategi: TULIS ULANG MainActivity sebagai stub v2 yang bersih
-          # ════════════════════════════════════════════════════════════════
-          MAIN_KT="$(find android -name 'MainActivity.kt'   2>/dev/null | head -1)"
-          MAIN_JAVA="$(find android -name 'MainActivity.java' 2>/dev/null | head -1)"
-
-          rewrite_main_activity_kt() {
-            local f="$1"
-            [ -f "$f" ] || return 0
-            local needs_fix=0
-
-            if grep -q "io\.flutter\.app\." "$f" 2>/dev/null; then needs_fix=1; fi
-            if grep -q "GeneratedPluginRegistrant\.registerWith" "$f" 2>/dev/null; then needs_fix=1; fi
-            if ! grep -q "io\.flutter\.embedding\.android\." "$f" 2>/dev/null; then needs_fix=1; fi
-
-            local pkg
-            pkg="$(grep -E '^package ' "$f" | head -1 | awk '{print $2}' | tr -d ';' | tr -d '[:space:]')"
-            if [ -z "$pkg" ]; then
-              pkg="com.example.app"
-            fi
-
-            if [ "$needs_fix" = "1" ]; then
-              echo "[v1->v2] Rewriting Kotlin MainActivity at $f (package=$pkg)"
-              cat > "$f" <<KOTLIN_EOF
-          package $pkg
-
-          import io.flutter.embedding.android.FlutterActivity
-
-          class MainActivity: FlutterActivity() {
-          }
-          KOTLIN_EOF
-              # Hilangkan indent 10-space yang ditambahkan oleh heredoc dalam yaml
-              sed -i 's/^          //' "$f"
-            else
-              echo "[v1->v2] $f sudah v2, skip rewrite."
-            fi
-          }
-
-          rewrite_main_activity_java() {
-            local f="$1"
-            [ -f "$f" ] || return 0
-            local needs_fix=0
-
-            if grep -q "io\.flutter\.app\." "$f" 2>/dev/null; then needs_fix=1; fi
-            if grep -q "GeneratedPluginRegistrant\.registerWith" "$f" 2>/dev/null; then needs_fix=1; fi
-            if ! grep -q "io\.flutter\.embedding\.android\." "$f" 2>/dev/null; then needs_fix=1; fi
-
-            local pkg
-            pkg="$(grep -E '^package ' "$f" | head -1 | awk '{print $2}' | tr -d ';' | tr -d '[:space:]')"
-            if [ -z "$pkg" ]; then
-              pkg="com.example.app"
-            fi
-
-            if [ "$needs_fix" = "1" ]; then
-              echo "[v1->v2] Rewriting Java MainActivity at $f (package=$pkg)"
-              cat > "$f" <<JAVA_EOF
-          package $pkg;
-
-          import io.flutter.embedding.android.FlutterActivity;
-
-          public class MainActivity extends FlutterActivity {
-          }
-          JAVA_EOF
-              sed -i 's/^          //' "$f"
-            else
-              echo "[v1->v2] $f sudah v2, skip rewrite."
-            fi
-          }
-
-          rewrite_main_activity_kt   "$MAIN_KT"
-          rewrite_main_activity_java "$MAIN_JAVA"
-
-          # ── Cari Application.kt/.java yg pakai io.flutter.app.FlutterApplication ─
-          find android -type f \( -name '*.kt' -o -name '*.java' \) -print0 2>/dev/null | \
-          while IFS= read -r -d '' file; do
-            if grep -q "io\.flutter\.app\.FlutterApplication" "$file" 2>/dev/null; then
-              echo "[v1->v2] Patching FlutterApplication ref di $file"
-              sed -i 's|io\.flutter\.app\.FlutterApplication|io.flutter.app.FlutterPlayStoreSplitApplication|g' "$file"
-              sed -i 's|io\.flutter\.app\.FlutterPlayStoreSplitApplication|io.flutter.embedding.android.FlutterApplication|g' "$file"
-            fi
-            if grep -q "io\.flutter\.app\.FlutterActivity" "$file" 2>/dev/null; then
-              echo "[v1->v2] Patching FlutterActivity ref di $file"
-              sed -i 's|io\.flutter\.app\.FlutterActivity|io.flutter.embedding.android.FlutterActivity|g' "$file"
-            fi
-            if grep -q "io\.flutter\.app\.FlutterFragmentActivity" "$file" 2>/dev/null; then
-              sed -i 's|io\.flutter\.app\.FlutterFragmentActivity|io.flutter.embedding.android.FlutterFragmentActivity|g' "$file"
-            fi
-            sed -i '/GeneratedPluginRegistrant\.registerWith.*this.*;/d' "$file"
-            sed -i '/GeneratedPluginRegistrant\.registerWith(this)/d'    "$file"
+          # Patch root gradle kotlin version
+          for f in android/build.gradle android/build.gradle.kts; do
+            [ -f "$f" ] && sed -i -E "s/(ext\.kotlin_version[[:space:]]*=[[:space:]]*['\"])[0-9]+\.[0-9]+\.[0-9]+(['\"])/\11.9.0\2/g" "$f" || true
           done
 
-          # ── AndroidManifest.xml: pastikan flutterEmbedding=2 ─────────────
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ]; then
-            echo "Patching AndroidManifest.xml..."
-            python3 <<'PYEOF'
-          import re, os
-          path = "android/app/src/main/AndroidManifest.xml"
-          src = open(path).read()
+          # gradle.properties
+          GRADLE_PROPS="android/gradle.properties"
+          mkdir -p android
+          touch "$GRADLE_PROPS"
+          grep -q "^android.useAndroidX" "$GRADLE_PROPS" || echo "android.useAndroidX=true" >> "$GRADLE_PROPS"
+          grep -q "^android.enableJetifier" "$GRADLE_PROPS" || echo "android.enableJetifier=true" >> "$GRADLE_PROPS"
+          grep -q "^org.gradle.jvmargs" "$GRADLE_PROPS" || echo "org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m" >> "$GRADLE_PROPS"
+          grep -q "^org.gradle.daemon" "$GRADLE_PROPS" || echo "org.gradle.daemon=false" >> "$GRADLE_PROPS"
+          grep -q "^org.gradle.parallel" "$GRADLE_PROPS" || echo "org.gradle.parallel=true" >> "$GRADLE_PROPS"
+          grep -q "^org.gradle.caching" "$GRADLE_PROPS" || echo "org.gradle.caching=true" >> "$GRADLE_PROPS"
 
-          # Hapus semua meta-data flutterEmbedding lama (apapun valuenya)
-          src = re.sub(
-              r'<meta-data\b[^/>]*android:name=["\']flutterEmbedding["\'][^/>]*/?>',
-              '', src, flags=re.IGNORECASE)
-          src = re.sub(
-              r'<meta-data\b[^/>]*android:value=["\'][^"\']*["\'][^/>]*android:name=["\']flutterEmbedding["\'][^/>]*/?>',
-              '', src, flags=re.IGNORECASE)
-
-          # Hapus referensi io.flutter.app.FlutterApplication di android:name application
-          src = re.sub(
-              r'(android:name=["\'])io\.flutter\.app\.FlutterApplication(["\'])',
-              r'\1${applicationName}\2', src)
-
-          # Sisipkan meta-data flutterEmbedding=2 di dalam tag <application>
-          def add_meta(m):
-              tag = m.group(0)
-              return tag + '\n        <meta-data android:name="flutterEmbedding" android:value="2" />'
-
-          if '<application' in src and 'flutterEmbedding' not in src:
-              src = re.sub(r'<application\b[^>]*>', add_meta, src, count=1)
-
-          open(path, 'w').write(src)
-          print("  ✓ AndroidManifest.xml patched (flutterEmbedding=2).")
-          PYEOF
+          # Fix gradle wrapper version
+          WRAPPER_PROPS="android/gradle/wrapper/gradle-wrapper.properties"
+          if [ -f "$WRAPPER_PROPS" ]; then
+            CURRENT_MAJOR="$(grep distributionUrl "$WRAPPER_PROPS" | grep -oP '[0-9]+' | head -1)"
+            if [ "${FLUTTER_MAJOR}" -ge 3 ] && [ "${CURRENT_MAJOR:-0}" -lt 8 ] 2>/dev/null; then
+              echo "Upgrade Gradle wrapper ke 8.9"
+              sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.9-bin.zip|g' "$WRAPPER_PROPS"
+            fi
           fi
 
-          echo "── Hasil patch ─────────────────────────────"
-          [ -n "$MAIN_KT"    ] && { echo "MainActivity.kt:";   cat "$MAIN_KT"; }
-          [ -n "$MAIN_JAVA"  ] && { echo "MainActivity.java:"; cat "$MAIN_JAVA"; }
-          [ -f "$MANIFEST"   ] && grep -A0 flutterEmbedding "$MANIFEST" || true
+          # Fix Android Embedding v1 → v2
+          MAIN_KT="$(find android -name 'MainActivity.kt' 2>/dev/null | head -1)"
+          MAIN_JAVA="$(find android -name 'MainActivity.java' 2>/dev/null | head -1)"
 
-      # ════════════════════════════════════════════════════════
-      # 4. PUB GET — dengan fallback
-      # ════════════════════════════════════════════════════════
+          if [ -n "$MAIN_KT" ]; then
+            PKG="$(grep -oP '(?<=^package )\S+' "$MAIN_KT" 2>/dev/null | head -1 || echo "com.example.app")"
+            if grep -q "io\.flutter\.app\." "$MAIN_KT" 2>/dev/null || ! grep -q "io\.flutter\.embedding" "$MAIN_KT" 2>/dev/null; then
+              echo "Fixing MainActivity.kt embedding v2"
+              cat > "$MAIN_KT" << KTEOF
+package $PKG
+import io.flutter.embedding.android.FlutterActivity
+class MainActivity: FlutterActivity()
+KTEOF
+            fi
+          elif [ -n "$MAIN_JAVA" ]; then
+            PKG="$(grep -oP '(?<=^package )\S+;' "$MAIN_JAVA" 2>/dev/null | head -1 | tr -d ';' || echo "com.example.app")"
+            if grep -q "io\.flutter\.app\." "$MAIN_JAVA" 2>/dev/null || ! grep -q "io\.flutter\.embedding" "$MAIN_JAVA" 2>/dev/null; then
+              echo "Fixing MainActivity.java embedding v2"
+              cat > "$MAIN_JAVA" << JAVAEOF
+package $PKG;
+import io.flutter.embedding.android.FlutterActivity;
+public class MainActivity extends FlutterActivity {}
+JAVAEOF
+            fi
+          fi
+
+          # Fix AndroidManifest.xml - remove v1 embedding
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            sed -i 's|android:name="flutterEmbedding" android:value="1"|android:name="flutterEmbedding" android:value="2"|g' "$MANIFEST"
+          fi
+
+      - name: Setup Android SDK Licenses
+        shell: bash
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+
       - name: Flutter Pub Get
         shell: bash
         run: |
           set -e
           cd "$PROJECT_DIR"
+          flutter pub get
 
-          run_pub_get() {
-            echo "Menjalankan flutter pub get..."
-            flutter pub get 2>&1 | tee /tmp/pub_get_log.txt
-            return ${PIPESTATUS[0]}
-          }
-
-          if [ -f pubspec.lock ]; then
-            if ! run_pub_get; then
-              echo "pub get gagal dengan pubspec.lock. Menghapus dan retry..."
-              rm -f pubspec.lock
-              run_pub_get
-            fi
-          else
-            run_pub_get
-          fi
-
-          if grep -q 'CONFLICT\|version solving failed' /tmp/pub_get_log.txt 2>/dev/null; then
-            echo "Dependency conflict terdeteksi. Coba dengan --no-example..."
-            flutter pub get --no-example || true
-          fi
-
-      # ════════════════════════════════════════════════════════
-      # 5. ANDROID SDK
-      # ════════════════════════════════════════════════════════
-      - name: Setup Android SDK Licenses & Tools
-        shell: bash
-        run: |
-          set +e
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          yes | sdkmanager --licenses >/dev/null 2>&1
-          sdkmanager "platform-tools" \
-                     "platforms;android-33" "build-tools;33.0.2" \
-                     "platforms;android-34" "build-tools;34.0.0" \
-                     "platforms;android-35" "build-tools;35.0.0" \
-                     "platforms;android-36" "build-tools;36.0.0" \
-                     "ndk;28.2.13676358" >/dev/null 2>&1
-          exit 0
-
-      # ════════════════════════════════════════════════════════
-      # 6. BUILD APK
-      # ════════════════════════════════════════════════════════
       - name: Build APK Release
         shell: bash
         run: |
           set -e
           cd "$PROJECT_DIR"
           flutter doctor --android-licenses 2>/dev/null || true
-          flutter build apk --release --no-tree-shake-icons
+          flutter build apk --release --no-tree-shake-icons --split-per-abi
 
       - name: Rename APK
         id: apk
@@ -479,12 +274,24 @@ jobs:
           set -e
           APK_DIR="$PROJECT_DIR/build/app/outputs/flutter-apk"
           BUILD_ID="${{ steps.zipfile.outputs.build_id }}"
+
+          # Prefer arm64 APK, fallback to universal
+          if [ -f "$APK_DIR/app-arm64-v8a-release.apk" ]; then
+            SRC_APK="$APK_DIR/app-arm64-v8a-release.apk"
+          elif [ -f "$APK_DIR/app-release.apk" ]; then
+            SRC_APK="$APK_DIR/app-release.apk"
+          else
+            SRC_APK="$(find "$APK_DIR" -name '*.apk' | head -1)"
+          fi
+
           APK_NAME="flutter-release-${BUILD_ID}.apk"
-          mv "$APK_DIR/app-release.apk" "$APK_DIR/$APK_NAME"
+          cp "$SRC_APK" "$APK_DIR/$APK_NAME"
           APK_SIZE="$(du -sh "$APK_DIR/$APK_NAME" | cut -f1)"
+
           echo "apk_name=$APK_NAME"          >> "$GITHUB_OUTPUT"
           echo "apk_path=$APK_DIR/$APK_NAME" >> "$GITHUB_OUTPUT"
           echo "apk_size=$APK_SIZE"          >> "$GITHUB_OUTPUT"
+          echo "APK berhasil: $APK_NAME ($APK_SIZE)"
 
       - name: Generate Release Tag
         id: tag
@@ -498,7 +305,7 @@ jobs:
           tag_name: "${{ steps.tag.outputs.tag }}"
           name: "Build ${{ steps.tag.outputs.tag }}"
           body: |
-            Build otomatis dari Bot/Web Panel
+            ✅ Build sukses otomatis dari Bot/Web Panel
             ZIP    : ${{ steps.zipfile.outputs.zip_name }}
             APK    : ${{ steps.apk.outputs.apk_name }}
             Size   : ${{ steps.apk.outputs.apk_size }}
@@ -514,4 +321,4 @@ jobs:
         with:
           name: "APK-${{ steps.zipfile.outputs.build_id }}"
           path: "${{ steps.apk.outputs.apk_path }}"
-          retention-days: 14
+          retention-days: 7
