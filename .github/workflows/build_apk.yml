@@ -515,7 +515,9 @@ jobs:
           FIXED_REPO_DIR="$(dirname "$ORIG_REPO_PATH")"
           FIXED_REPO_PATH="${FIXED_REPO_DIR}/${FIXED_ZIP_NAME}"
 
-          B64_CONTENT="$(base64 -w 0 "$FIXED_ZIP_PATH")"
+          # ── Encode ZIP ke base64 file (hindari "Argument list too long") ──
+          B64_FILE="/tmp/ai_fix_b64_${NEXT_ATTEMPT}.txt"
+          base64 -w 0 "$FIXED_ZIP_PATH" > "$B64_FILE"
 
           # Cek apakah file sudah ada (butuh SHA untuk update)
           EXISTING_SHA="$(curl -s \
@@ -524,26 +526,33 @@ jobs:
             "https://api.github.com/repos/${REPO_FULL}/contents/${FIXED_REPO_PATH}?ref=${BRANCH}" \
             | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('sha',''))" 2>/dev/null || echo "")"
 
-          # Build JSON payload
-          PAYLOAD="$(python3 -c "
-          import json, sys
-          payload = {
-            'message': 'bot: AI auto-fix ZIP attempt $NEXT_ATTEMPT — build $BUILD_ID',
-            'content': sys.argv[1],
-            'branch':  sys.argv[2],
-          }
-          sha = sys.argv[3]
-          if sha:
-              payload['sha'] = sha
-          print(json.dumps(payload))
-          " "$B64_CONTENT" "$BRANCH" "$EXISTING_SHA")"
+          # Build JSON payload — baca b64 dari file, bukan argv (fix Argument list too long)
+          PAYLOAD_FILE="/tmp/ai_fix_payload_${NEXT_ATTEMPT}.json"
+          python3 - "$B64_FILE" "$BRANCH" "$EXISTING_SHA" "$NEXT_ATTEMPT" "$BUILD_ID" <<'PYEOF'
+import json, sys
+b64_file, branch, sha, attempt, build_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+with open(b64_file, 'r') as f:
+    b64_content = f.read().strip()
+payload = {
+    'message': f'bot: AI auto-fix ZIP attempt {attempt} — build {build_id}',
+    'content': b64_content,
+    'branch':  branch,
+}
+if sha:
+    payload['sha'] = sha
+with open('/tmp/ai_fix_payload_out.json', 'w') as out:
+    json.dump(payload, out)
+PYEOF
+          mv /tmp/ai_fix_payload_out.json "$PAYLOAD_FILE"
+          rm -f "$B64_FILE"
 
           PUSH_RESP="$(curl -s -X PUT \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             "https://api.github.com/repos/${REPO_FULL}/contents/${FIXED_REPO_PATH}" \
-            -d "$PAYLOAD")"
+            --data-binary "@$PAYLOAD_FILE")"
+          rm -f "$PAYLOAD_FILE"
 
           PUSH_SHA="$(echo "$PUSH_RESP" | python3 -c \
             "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('content',{}).get('sha',''))" 2>/dev/null || echo "")"
@@ -585,20 +594,22 @@ jobs:
           # Tunggu sebentar agar file sudah tersedia di GitHub
           sleep 8
 
-          DISPATCH_PAYLOAD="$(python3 -c "
-          import json
-          payload = {
-            'ref': '$BRANCH',
-            'inputs': {
-              'zip_filename':    '$FIXED_ZIP',
-              'build_id':        '${BUILD_ID}-fix${NEXT_ATTEMPT}',
-              'flutter_version': '$FLUTTER_VER',
-              'ai_fix_attempt':  '$NEXT_ATTEMPT',
-              'original_zip_path': '$FIXED_ZIP',
-            }
-          }
-          print(json.dumps(payload))
-          ")"
+          DISPATCH_PAYLOAD="$(python3 - "$FIXED_ZIP" "$BUILD_ID" "$NEXT_ATTEMPT" "$FLUTTER_VER" "$BRANCH" <<'PYEOF'
+import json, sys
+fixed_zip, build_id, next_attempt, flutter_ver, branch = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+payload = {
+  'ref': branch,
+  'inputs': {
+    'zip_filename':      fixed_zip,
+    'build_id':          f'{build_id}-fix{next_attempt}',
+    'flutter_version':   flutter_ver,
+    'ai_fix_attempt':    next_attempt,
+    'original_zip_path': fixed_zip,
+  }
+}
+print(json.dumps(payload))
+PYEOF
+          )"
 
           DISPATCH_RESP="$(curl -s -o /dev/null -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
