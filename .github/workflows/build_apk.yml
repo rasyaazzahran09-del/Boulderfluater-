@@ -41,7 +41,7 @@ jobs:
           node-version: "24"
 
       # =========================
-      # DOWNLOAD ZIP
+      # DOWNLOAD ZIP (mendukung split upload untuk file > 90 MB)
       # =========================
       - name: Download ZIP project
         run: |
@@ -50,23 +50,38 @@ jobs:
 
           ZIP_URL="${{ github.event.inputs.zip_url }}"
 
-          # Deteksi apakah URL adalah GitHub Contents API atau URL biasa
-          if echo "$ZIP_URL" | grep -q "api.github.com/repos"; then
-            echo "→ GitHub Contents API URL terdeteksi, pakai header Accept: raw"
-            curl -L \
-              -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
-              -H "Accept: application/vnd.github.raw" \
-              "$ZIP_URL" \
-              -o project.zip \
-              -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
+          download_gh_file() {
+            local url="$1"
+            local out="$2"
+            if echo "$url" | grep -q "api.github.com/repos"; then
+              curl -fsSL                 -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}"                 -H "Accept: application/vnd.github.raw"                 "$url" -o "$out"
+            else
+              curl -fsSL                 -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}"                 -H "Accept: application/octet-stream"                 "$url" -o "$out"
+            fi
+          }
+
+          # Cek apakah ini manifest split upload
+          MANIFEST_URL="${ZIP_URL}.manifest"
+          MANIFEST_STATUS=$(curl -o /dev/null -s -w "%{http_code}"             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}"             -H "Accept: application/vnd.github.raw"             "$MANIFEST_URL" 2>/dev/null || echo "000")
+
+          if [ "$MANIFEST_STATUS" = "200" ]; then
+            echo "→ Split upload terdeteksi, mengunduh manifest..."
+            download_gh_file "$MANIFEST_URL" manifest.json
+            PARTS=$(python3 -c "import json,sys; d=json.load(open('manifest.json')); print(d['parts'])")
+            echo "  Total bagian: $PARTS"
+            > project.zip  # buat file kosong
+            for i in $(seq 1 $PARTS); do
+              PADDED=$(printf "%03d" $i)
+              PART_URL="${ZIP_URL}.part${PADDED}"
+              echo "  Mengunduh bagian $i/$PARTS..."
+              download_gh_file "$PART_URL" "part_${PADDED}.bin"
+              cat "part_${PADDED}.bin" >> project.zip
+              rm -f "part_${PADDED}.bin"
+            done
+            echo "✅ Re-assembly selesai"
           else
-            echo "→ URL biasa"
-            curl -L \
-              -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
-              -H "Accept: application/octet-stream" \
-              "$ZIP_URL" \
-              -o project.zip \
-              -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
+            echo "→ File tunggal"
+            download_gh_file "$ZIP_URL" project.zip
           fi
 
           echo ""
