@@ -1,0 +1,122 @@
+name: Build React Native APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "URL download ZIP project React Native"
+        required: true
+      tag:
+        description: "Tag build"
+        required: true
+      build_type:
+        description: "debug / release"
+        required: true
+        default: "release"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Xmx4g"
+
+    steps:
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Download ZIP project
+        run: |
+          ZIP_URL="${{ github.event.inputs.zip_url }}"
+          if echo "$ZIP_URL" | grep -q "api.github.com/repos"; then
+            curl -L -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+              -H "Accept: application/vnd.github.raw" \
+              "$ZIP_URL" -o project.zip -w "\nHTTP: %{http_code}\n"
+          else
+            curl -L -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              "$ZIP_URL" -o project.zip -w "\nHTTP: %{http_code}\n"
+          fi
+          ls -lh project.zip
+
+      - name: Extract ZIP
+        run: |
+          if ! unzip -t project.zip > /dev/null 2>&1; then
+            echo "❌ ZIP tidak valid!"; exit 1
+          fi
+          unzip -q project.zip -d project_raw
+          SUB=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
+          FILES=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
+          if [ "$SUB" -eq 1 ] && [ "$FILES" -eq 0 ]; then
+            PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
+          else
+            PROJECT_DIR="project_raw"
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "✅ Project: $PROJECT_DIR"
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.PROJECT_DIR }}/node_modules
+            ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json', '**/yarn.lock') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Install Node Dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f "yarn.lock" ]; then
+            echo "→ Using Yarn"
+            npm install -g yarn
+            yarn install --frozen-lockfile || yarn install
+          else
+            echo "→ Using NPM"
+            npm ci || npm install
+          fi
+
+      - name: Build React Native APK
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: |
+          chmod +x gradlew
+          if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+            ./gradlew assembleDebug --no-daemon --parallel --build-cache
+          else
+            ./gradlew assembleRelease --no-daemon --parallel --build-cache
+          fi
+
+      - name: Find & Upload APK
+        run: |
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | grep -v "test" | head -n 1)
+          if [ -z "$APK_FOUND" ]; then echo "❌ APK tidak ditemukan!"; exit 1; fi
+          ls -lh "$APK_FOUND"
+          APK_REL=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
+          echo "APK_PATH=$APK_REL" >> $GITHUB_ENV
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: react-native-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
+          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
+          retention-days: 1
+          if-no-files-found: error
