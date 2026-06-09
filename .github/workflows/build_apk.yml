@@ -1,701 +1,263 @@
-# ╔══════════════════════════════════════════════════════════════════════╗
-# ║  Flutter Build Bot v3.3 — AI Blackboxai Auto-Fix + Auto Push       ║
-# ║                                                                      ║
-# ║  Alur:                                                               ║
-# ║  1. Ekstrak ZIP Flutter dari repo                                    ║
-# ║  2. Auto-patch file build (gradle, sdk, embedding, manifest)         ║
-# ║  3. Build APK release                                                ║
-# ║  4. Jika GAGAL → AI analisis → buat patch → apply → push fix        ║
-# ║  5. Re-trigger build otomatis (max 3x retry)                         ║
-# ║  6. APK sukses → upload Release + Artifact                           ║
-# ╚══════════════════════════════════════════════════════════════════════╝
-
-name: Flutter Build Bot
-run-name: "Build ${{ inputs.build_id || github.run_id }}${{ inputs.ai_fix_attempt != '0' && format(' [AI-Fix#{0}]', inputs.ai_fix_attempt) || '' }}"
+name: Build Flutter APK
 
 on:
   workflow_dispatch:
     inputs:
-      zip_filename:
-        description: "Path file ZIP di repo (contoh: bot-builds/xxx/project.zip)"
+      zip_url:
+        description: "URL download ZIP project Flutter"
         required: true
-        default: "project.zip"
-      build_id:
-        description: "ID unik build dari bot"
+
+      tag:
+        description: "Tag build"
         required: true
-        default: "manual-build"
-      flutter_version:
-        description: "Versi Flutter: auto / stable / beta / 3.x.x"
-        required: false
-        default: "auto"
-      ai_fix_attempt:
-        description: "Nomor attempt AI fix (0 = build pertama, 1-3 = retry setelah AI fix)"
-        required: false
-        default: "0"
-      original_zip_path:
-        description: "Path ZIP asli di repo (untuk AI re-upload setelah fix)"
-        required: false
-        default: ""
 
-permissions:
-  contents: write
-  actions:  write
+      build_type:
+        description: "debug / release"
+        required: true
+        default: "release"
 
-env:
-  DEFAULT_FLUTTER_VERSION: "3.32.0"
-  DEFAULT_FLUTTER_CHANNEL: "stable"
-  AI_API_BASE:             "https://app.siputzx.my.id/api"
-  MAX_FIX_ATTEMPT:         "3"
+      only_analyze:
+        description: "Hanya jalankan analyze (true/false)"
+        required: false
+        default: "false"
 
 jobs:
-  build-apk:
-    name: "Build APK${{ inputs.ai_fix_attempt != '0' && format(' [AI-Fix #{0}]', inputs.ai_fix_attempt) || '' }}"
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
-      # ──────────────────────────────────────────────────────────
-      # 1. Checkout repo
-      # ──────────────────────────────────────────────────────────
-      - name: Checkout
-        uses: actions/checkout@v4
+
+      # =========================
+      # NODE.JS
+      # =========================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          node-version: "24"
 
-      # ──────────────────────────────────────────────────────────
-      # 2. Validasi & Ekstrak ZIP
-      # ──────────────────────────────────────────────────────────
-      - name: Validasi dan Ekstrak ZIP
-        id: extract
-        shell: bash
+      # =========================
+      # DOWNLOAD ZIP
+      # =========================
+      - name: Download ZIP project
         run: |
-          set -euo pipefail
-          INPUT_ZIP="${{ inputs.zip_filename }}"
-          BUILD_ID="${{ inputs.build_id }}"
-          AI_ATTEMPT="${{ inputs.ai_fix_attempt }}"
+          echo "=== Downloading ZIP ==="
+          echo "URL: ${{ github.event.inputs.zip_url }}"
 
-          echo "=== Input ZIP : $INPUT_ZIP ==="
-          echo "=== Build ID  : $BUILD_ID ==="
-          echo "=== AI Attempt: $AI_ATTEMPT ==="
+          ZIP_URL="${{ github.event.inputs.zip_url }}"
 
-          if [ -f "$INPUT_ZIP" ]; then
-            ZIP_PATH="$INPUT_ZIP"
+          # Deteksi apakah URL adalah GitHub Contents API atau URL biasa
+          if echo "$ZIP_URL" | grep -q "api.github.com/repos"; then
+            echo "→ GitHub Contents API URL terdeteksi, pakai header Accept: raw"
+            curl -L \
+              -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+              -H "Accept: application/vnd.github.raw" \
+              "$ZIP_URL" \
+              -o project.zip \
+              -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
           else
-            ZIP_PATH="$(find "$GITHUB_WORKSPACE" -name "$(basename "$INPUT_ZIP")" -type f | head -1)"
+            echo "→ URL biasa"
+            curl -L \
+              -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              "$ZIP_URL" \
+              -o project.zip \
+              -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
           fi
 
-          if [ -z "$ZIP_PATH" ] || [ ! -f "$ZIP_PATH" ]; then
-            echo "❌ File ZIP tidak ditemukan: $INPUT_ZIP"
-            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f | grep -v '.git/' | head -50
-            exit 1
-          fi
+          echo ""
+          echo "=== File Info ==="
+          ls -lh project.zip
 
-          echo "✅ ZIP ditemukan: $ZIP_PATH"
+          echo ""
+          echo "=== File Type ==="
+          file project.zip
 
-          WORK_DIR="$GITHUB_WORKSPACE/_build_ws"
-          EXTRACT_DIR="$WORK_DIR/extracted"
-          PROJECT_DIR="$WORK_DIR/project"
-          rm -rf "$WORK_DIR"
-          mkdir -p "$EXTRACT_DIR" "$PROJECT_DIR"
+          echo ""
+          echo "=== First Bytes ==="
+          xxd project.zip | head -2
 
-          unzip -q -o "$ZIP_PATH" -d "$EXTRACT_DIR"
-
-          PUBSPEC="$(find "$EXTRACT_DIR" -type f -name "pubspec.yaml" \
-            | grep -v '/build/' | grep -v '/.dart_tool/' | head -1)"
-
-          if [ -z "$PUBSPEC" ]; then
-            echo "❌ pubspec.yaml tidak ditemukan di ZIP."
-            find "$EXTRACT_DIR" -maxdepth 5 | head -80
-            exit 1
-          fi
-
-          SRC="$(dirname "$PUBSPEC")"
-          cp -a "$SRC/." "$PROJECT_DIR/"
-
-          echo "✅ Proyek Flutter: $SRC"
-          echo "project_dir=$PROJECT_DIR"   >> "$GITHUB_OUTPUT"
-          echo "build_id=$BUILD_ID"          >> "$GITHUB_OUTPUT"
-          echo "zip_path=$ZIP_PATH"          >> "$GITHUB_OUTPUT"
-          echo "PROJECT_DIR=$PROJECT_DIR"    >> "$GITHUB_ENV"
-
-      # ──────────────────────────────────────────────────────────
-      # 3. Deteksi versi Flutter + Java
-      # ──────────────────────────────────────────────────────────
-      - name: Deteksi Versi Flutter dan Java
-        id: ver
-        shell: bash
+      # =========================
+      # EXTRACT ZIP
+      # =========================
+      - name: Extract ZIP
         run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
+          echo "=== Validating ZIP ==="
 
-          INPUT="${{ inputs.flutter_version }}"
-          VERSION=""
-          CHANNEL="$DEFAULT_FLUTTER_CHANNEL"
-
-          if [ -n "$INPUT" ] && [ "$INPUT" != "auto" ]; then
-            case "$INPUT" in
-              stable|beta|master|main)
-                CHANNEL="$INPUT"
-                [ "$INPUT" = "main" ] && CHANNEL="master"
-                VERSION=""
-                ;;
-              *) VERSION="$INPUT" ;;
-            esac
-          elif [ -f ".fvm/fvm_config.json" ]; then
-            FVM_V="$(python3 -c \
-              "import json,sys; d=json.load(open('.fvm/fvm_config.json')); \
-               print(d.get('flutterSdkVersion') or d.get('flutter') or '')" \
-              2>/dev/null || true)"
-            [ -n "$FVM_V" ] && VERSION="$FVM_V"
-          elif [ -f ".flutter-version" ]; then
-            VERSION="$(cat .flutter-version | tr -d '[:space:]')"
+          if ! unzip -t project.zip > /dev/null 2>&1; then
+            echo "❌ File bukan ZIP valid!"
+            echo ""
+            echo "=== Isi file ==="
+            cat project.zip
+            exit 1
           fi
 
-          [ -z "$VERSION" ] && VERSION="$DEFAULT_FLUTTER_VERSION"
+          echo "✅ ZIP valid"
 
-          MAJOR="$(echo "$VERSION" | cut -d. -f1)"; MAJOR="${MAJOR:-3}"
-          MINOR="$(echo "$VERSION" | cut -d. -f2)"; MINOR="${MINOR:-0}"
+          echo ""
+          echo "=== Extracting ZIP ==="
+          unzip -q project.zip -d project_raw
 
-          if   [ "$MAJOR" -lt 2 ] 2>/dev/null;                          then JAVA="8"
-          elif [ "$MAJOR" -eq 2 ] && [ "$MINOR" -lt 5 ] 2>/dev/null;   then JAVA="8"
-          elif [ "$MAJOR" -eq 2 ] 2>/dev/null;                          then JAVA="11"
-          elif [ "$MAJOR" -eq 3 ] && [ "$MINOR" -lt 10 ] 2>/dev/null;  then JAVA="17"
-          else                                                                JAVA="21"
+          echo ""
+          echo "=== Isi folder project_raw ==="
+          find project_raw | head -50
+
+          echo ""
+          echo "=== Mengunci Project Dir ==="
+
+          SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
+          FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
+
+          if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
+            PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
+          else
+            PROJECT_DIR="project_raw"
           fi
 
-          echo "✅ Flutter: $VERSION (channel=$CHANNEL) | Java: $JAVA"
-          echo "flutter_version=$VERSION"  >> "$GITHUB_OUTPUT"
-          echo "flutter_channel=$CHANNEL"  >> "$GITHUB_OUTPUT"
-          echo "java_version=$JAVA"        >> "$GITHUB_OUTPUT"
-          echo "flutter_major=$MAJOR"      >> "$GITHUB_OUTPUT"
-          echo "FLUTTER_MAJOR=$MAJOR"      >> "$GITHUB_ENV"
+          echo "✅ Project root: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
-      # ──────────────────────────────────────────────────────────
-      # 4. Setup Java
-      # ──────────────────────────────────────────────────────────
-      - name: Setup Java ${{ steps.ver.outputs.java_version }}
+      # =========================
+      # JAVA
+      # =========================
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: "${{ steps.ver.outputs.java_version }}"
+          distribution: "temurin"
+          java-version: "17"
 
-      # ──────────────────────────────────────────────────────────
-      # 5. Setup Flutter
-      # ──────────────────────────────────────────────────────────
-      - name: Setup Flutter ${{ steps.ver.outputs.flutter_version }}
-        uses: subosito/flutter-action@v2
+      # =========================
+      # FLUTTER
+      # =========================
+      - name: Setup Flutter
+        uses: subosito/flutter-action@main
         with:
-          flutter-version: "${{ steps.ver.outputs.flutter_version }}"
-          channel:         "${{ steps.ver.outputs.flutter_channel }}"
-          cache:           true
+          flutter-version: "3.41.9"
+          channel: "stable"
+          cache: true
 
-      # ──────────────────────────────────────────────────────────
-      # 6. Cache Pub
-      # ──────────────────────────────────────────────────────────
-      - name: Cache Pub
-        uses: actions/cache@v4
-        with:
-          path: ~/.pub-cache
-          key: "${{ runner.os }}-pub-${{ steps.ver.outputs.flutter_version }}-${{ hashFiles('**/pubspec.lock','**/pubspec.yaml') }}"
-          restore-keys: |
-            ${{ runner.os }}-pub-${{ steps.ver.outputs.flutter_version }}-
-            ${{ runner.os }}-pub-
-
-      # ──────────────────────────────────────────────────────────
-      # 7. Auto-Patch file build Android (gradle, manifest, dll)
-      # ──────────────────────────────────────────────────────────
-      - name: Auto Patch Build Files
-        shell: bash
+      # ==========================================================
+      # 🔍 ANALYZE — STEP 1: Jalankan & cetak hasil
+      # ==========================================================
+      - name: Analyze Project Code
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
+          echo "=== Starting Automated Code Analysis ==="
 
-          flutter --version
-          flutter config --no-analytics 2>/dev/null || true
-          rm -rf .dart_tool build .flutter-plugins .flutter-plugins-dependencies
+          if [ -f "pubspec.yaml" ]; then
+            echo "🔍 Menjalankan linting via flutter analyze..."
 
-          MAJOR="${FLUTTER_MAJOR:-3}"
+            flutter analyze > analyze_report.txt 2>&1 || true
 
-          # ── Dart typo umum ────────────────────────────────────
-          find lib -type f -name "*.dart" -print0 2>/dev/null | xargs -0 -r sed -i \
-            -e 's/TextOverflowellipsis/TextOverflow.ellipsis/g' \
-            -e 's/MainAxisAlignmentcenter/MainAxisAlignment.center/g' \
-            -e 's/CrossAxisAlignmentcenter/CrossAxisAlignment.center/g' \
-            -e 's/FontWeightbold/FontWeight.bold/g' \
-            -e 's/EdgeInsetsall(/EdgeInsets.all(/g' \
-            -e 's/BorderRadiuscircular(/BorderRadius.circular(/g' \
-            || true
+            echo "[RESULT_ANALYZE]"
+            cat analyze_report.txt
+            echo "[END_RESULT_ANALYZE]"
 
-          # ── Patch build.gradle / build.gradle.kts ────────────
-          patch_gradle() {
-            local f="$1"; [ -f "$f" ] || return 0
-            echo "  Patching: $f"
-            sed -i -E 's/(compileSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.(compileSdk|compileSdkVersion)|[0-9]+)/\135/g' "$f"
-            sed -i -E 's/(targetSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.(targetSdk|targetSdkVersion)|[0-9]+)/\135/g'    "$f"
-            sed -i -E 's/(minSdk(Version)?[[:space:]]*=?[[:space:]]*)(flutter\.(minSdk|minSdkVersion)|[0-9]+)/\121/g'             "$f"
-            sed -i -E 's/JavaVersion\.VERSION_1_[5-9]/JavaVersion.VERSION_11/g' "$f"
-            sed -i -E 's/JavaVersion\.VERSION_[0-9]+/JavaVersion.VERSION_17/g'  "$f"
-            sed -i -E 's/(ndkVersion[[:space:]]*=?[[:space:]]*")[^"]+(")/\127.0.12077973\2/g' "$f"
-            sed -i -E "s/(ndkVersion[[:space:]]*=?[[:space:]]*')[^']+(')/\127.0.12077973\2/g" "$f"
-          }
-          patch_gradle "android/app/build.gradle"
-          patch_gradle "android/app/build.gradle.kts"
+            rm -f analyze_report.txt
 
-          # ── Kotlin version ───────────────────────────────────
-          for f in android/build.gradle android/build.gradle.kts; do
-            [ -f "$f" ] || continue
-            sed -i -E "s/(ext\.kotlin_version[[:space:]]*=[[:space:]]*['\"])[^'\"]+(['\"])/\11.9.24\2/g" "$f"
-            sed -i -E "s/(id[[:space:]]*\"org\.jetbrains\.kotlin\.android\"[[:space:]]*)[^)]+/\1version \"1.9.24\"/g" "$f" || true
-          done
-
-          # ── gradle.properties ─────────────────────────────────
-          GPROPS="android/gradle.properties"
-          mkdir -p android && touch "$GPROPS"
-          _set_prop() { grep -q "^$1" "$GPROPS" || echo "$1$2" >> "$GPROPS"; }
-          _set_prop "android.useAndroidX="            "true"
-          _set_prop "android.enableJetifier="         "true"
-          _set_prop "org.gradle.jvmargs="             "-Xmx4g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError"
-          _set_prop "org.gradle.daemon="              "false"
-          _set_prop "org.gradle.parallel="            "true"
-          _set_prop "org.gradle.caching="             "true"
-          _set_prop "org.gradle.configureondemand="   "true"
-
-          # ── Gradle Wrapper ───────────────────────────────────
-          WRAPPER="android/gradle/wrapper/gradle-wrapper.properties"
-          if [ -f "$WRAPPER" ]; then
-            CUR="$(grep -oP 'gradle-\K[0-9]+' "$WRAPPER" | head -1 || echo 0)"
-            if [ "$MAJOR" -ge 3 ] && [ "${CUR:-0}" -lt 8 ]; then
-              echo "  Upgrade Gradle wrapper → 8.10.2"
-              sed -i 's|distributionUrl=.*|distributionUrl=https\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|g' "$WRAPPER"
-            fi
           else
-            mkdir -p "$(dirname "$WRAPPER")"
-            cat > "$WRAPPER" << 'GRADLEW'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.10.2-bin.zip
-          networkTimeout=10000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          GRADLEW
+            echo "☕ Project native / gradlew terdeteksi!"
+            echo "[RESULT_ANALYZE]"
+            echo "❌ Fitur analyze hanya support project Flutter (pubspec.yaml tidak ditemukan)."
+            echo "[END_RESULT_ANALYZE]"
           fi
 
-          # ── Android Embedding v2 ─────────────────────────────
-          FIX_EMBED() {
-            local f="$1" lang="$2"; [ -f "$f" ] || return 0
-            if grep -q "io\.flutter\.app\." "$f" 2>/dev/null || \
-               ! grep -q "io\.flutter\.embedding" "$f" 2>/dev/null; then
-              PKG="$(grep -oP '(?<=^package )[\w.]+' "$f" 2>/dev/null | head -1 || echo 'com.example.app')"
-              if [ "$lang" = "kt" ]; then
-                printf 'package %s\nimport io.flutter.embedding.android.FlutterActivity\nclass MainActivity: FlutterActivity()\n' "$PKG" > "$f"
-              else
-                printf 'package %s;\nimport io.flutter.embedding.android.FlutterActivity;\npublic class MainActivity extends FlutterActivity {}\n' "$PKG" > "$f"
-              fi
-            fi
-          }
-          FIX_EMBED "$(find android -name 'MainActivity.kt'   2>/dev/null | head -1)" kt
-          FIX_EMBED "$(find android -name 'MainActivity.java' 2>/dev/null | head -1)" java
-
-          # ── AndroidManifest.xml ──────────────────────────────
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ]; then
-            sed -i 's|android:value="1"|android:value="2"|g' "$MANIFEST"
-            grep -q "INTERNET" "$MANIFEST" || \
-              sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
-          fi
-
-          echo "✅ Auto-patch selesai"
-
-      # ──────────────────────────────────────────────────────────
-      # 8. Accept Android Licenses
-      # ──────────────────────────────────────────────────────────
-      - name: Accept Android Licenses
-        shell: bash
+      # ==========================================================
+      # 🔍 ANALYZE — STEP 2: Stop jika only_analyze
+      # ==========================================================
+      - name: Stop if Analyze Only
+        if: ${{ github.event.inputs.only_analyze == 'true' }}
         run: |
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-35" "build-tools;35.0.0" > /dev/null 2>&1 || true
+          echo "Analyze-only mode aktif. Workflow dihentikan di sini."
+          exit 1
 
-      # ──────────────────────────────────────────────────────────
-      # 9. Flutter Pub Get
-      # ──────────────────────────────────────────────────────────
-      - name: Flutter Pub Get
-        shell: bash
+      # =========================
+      # FLUTTER DOCTOR
+      # =========================
+      - name: Flutter Doctor
+        run: flutter doctor
+
+      # =========================
+      # PUB GET
+      # =========================
+      - name: Get dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          flutter pub get --no-example
-
-      # ──────────────────────────────────────────────────────────
-      # 10. Build APK Release (tidak langsung exit jika gagal)
-      # ──────────────────────────────────────────────────────────
-      - name: Build APK Release
-        id: build_apk
-        shell: bash
-        run: |
-          set -uo pipefail
-          cd "$PROJECT_DIR"
-          flutter doctor --android-licenses 2>/dev/null || true
-
-          BUILD_LOG="$GITHUB_WORKSPACE/_build_log.txt"
-          set +e
-          flutter build apk \
-            --release \
-            --no-tree-shake-icons \
-            --split-per-abi \
-            --verbose 2>&1 | tee "$BUILD_LOG" | tail -100
-          BUILD_EXIT=${PIPESTATUS[0]}
-          set -e
-
-          echo "build_log_path=$BUILD_LOG" >> "$GITHUB_OUTPUT"
-          if [ "$BUILD_EXIT" -ne 0 ]; then
-            echo "build_failed=true"  >> "$GITHUB_OUTPUT"
-            echo "❌ Build gagal (exit $BUILD_EXIT)"
-            exit "$BUILD_EXIT"
-          fi
-          echo "build_failed=false" >> "$GITHUB_OUTPUT"
-          echo "✅ Build APK berhasil"
-
-      # ──────────────────────────────────────────────────────────
-      # 11. AI Auto-Fix + Auto Push ke GitHub (jika build gagal)
-      # ──────────────────────────────────────────────────────────
-      - name: AI Auto-Fix dan Push ZIP Fix ke GitHub
-        id: ai_fix
-        if: failure() && steps.build_apk.outputs.build_failed == 'true'
-        shell: bash
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BUILD_LOG="${{ steps.build_apk.outputs.build_log_path }}"
-          BUILD_ID="${{ steps.extract.outputs.build_id }}"
-          AI_ATTEMPT="${{ inputs.ai_fix_attempt }}"
-          ORIG_ZIP="${{ steps.extract.outputs.zip_path }}"
-          FLUTTER_VER="${{ inputs.flutter_version }}"
-          ORIG_ZIP_PATH="${{ inputs.original_zip_path }}"
-          REPO_FULL="${{ github.repository }}"
-          BRANCH="${{ github.ref_name }}"
-
-          MAX_ATTEMPT="$MAX_FIX_ATTEMPT"
-          NEXT_ATTEMPT=$(( AI_ATTEMPT + 1 ))
-
-          echo "======================================"
-          echo "🤖 AI Auto-Fix — Attempt $NEXT_ATTEMPT/$MAX_ATTEMPT"
-          echo "======================================"
-
-          # Cek apakah sudah melebihi batas retry
-          if [ "$NEXT_ATTEMPT" -gt "$MAX_ATTEMPT" ]; then
-            echo "⚠️ Sudah melebihi MAX_FIX_ATTEMPT=$MAX_ATTEMPT. Berhenti retry."
-            echo "ai_fix_skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # ── Ambil error log ────────────────────────────────────
-          ERROR_LOG="$(tail -c 4000 "$BUILD_LOG" 2>/dev/null || echo 'log tidak tersedia')"
-          echo "📋 Error log sample (500 char):"
-          echo "${ERROR_LOG: -500}"
-
-          # ── Kirim ke AI blackboxai ─────────────────────────────
-          echo ""
-          echo "🤖 Mengirim ke AI blackboxai..."
-
-          PROMPT="Kamu adalah expert Flutter dan Android build engineer.
-          Ada error saat build APK Flutter di GitHub Actions.
-          Tugas: buat HANYA bash patch script, tidak ada teks lain, tidak ada penjelasan.
-          Script dijalankan dari ROOT direktori Flutter project (ada pubspec.yaml).
-          Perbaiki SEMUA error. Jangan interaktif. Mulai dengan: #!/bin/bash
-          set -e
-
-          ERROR LOG:
-          ${ERROR_LOG}"
-
-          ENCODED_PROMPT="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$PROMPT" 2>/dev/null || echo "")"
-
-          AI_RESP=""
-          # Coba blackboxai dulu, fallback deepseek-r1
-          for ENDPOINT in "blackboxai" "deepseek-r1"; do
-            AI_URL="${AI_API_BASE}/ai/${ENDPOINT}"
-            echo "  → Mencoba endpoint: $AI_URL"
-            AI_RESP="$(curl -s --max-time 90 "${AI_URL}?content=${ENCODED_PROMPT}" 2>/dev/null || echo "")"
-            if [ -n "$AI_RESP" ] && [ "${#AI_RESP}" -gt 20 ]; then
-              echo "  ✅ Respons dari $ENDPOINT"
-              break
-            fi
-            echo "  ⚠️ $ENDPOINT gagal/kosong, coba berikutnya..."
-          done
-
-          if [ -z "$AI_RESP" ] || [ "${#AI_RESP}" -lt 10 ]; then
-            echo "❌ AI tidak menghasilkan respons. Skip auto-fix."
-            echo "ai_fix_skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # ── Parse patch script dari respons AI ────────────────
-          PATCH_SCRIPT="$(echo "$AI_RESP" | python3 -c "
-          import json, sys, re
-          raw = sys.stdin.read().strip()
-          try:
-              d = json.loads(raw)
-              txt = d.get('data') or d.get('result') or d.get('message') or str(d)
-          except Exception:
-              txt = raw
-          # Bersihkan markdown code fence
-          txt = re.sub(r'^[\s\S]*?(?=#!/bin/bash)', '', txt)
-          txt = re.sub(r'\`\`\`[a-z]*\n?', '', txt)
-          txt = txt.strip()
-          if not txt.startswith('#!'):
-              txt = '#!/bin/bash\nset -e\n' + txt
-          print(txt)
-          " 2>/dev/null || echo "")"
-
-          if [ -z "$PATCH_SCRIPT" ] || [ "${#PATCH_SCRIPT}" -lt 15 ]; then
-            echo "⚠️ Patch script terlalu pendek / kosong. Skip."
-            echo "ai_fix_skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo ""
-          echo "📝 Patch script yang akan diapply (preview 30 baris):"
-          echo "-------------------------------------------------------"
-          echo "$PATCH_SCRIPT" | head -30
-          echo "-------------------------------------------------------"
-
-          # ── Ekstrak ZIP asli ke temp dir ──────────────────────
-          TMPDIR_FIX="$(mktemp -d /tmp/aifix-XXXXXX)"
-          echo ""
-          echo "📦 Mengekstrak ZIP: $ORIG_ZIP → $TMPDIR_FIX"
-          unzip -q -o "$ORIG_ZIP" -d "$TMPDIR_FIX" || {
-            echo "❌ Gagal ekstrak ZIP asli."
-            echo "ai_fix_skipped=true" >> "$GITHUB_OUTPUT"
-            rm -rf "$TMPDIR_FIX"
-            exit 0
-          }
-
-          # Cari root project Flutter
-          PUBSPEC_FIX="$(find "$TMPDIR_FIX" -name "pubspec.yaml" -not -path '*/build/*' | head -1)"
-          PROJECT_FIX="$(dirname "$PUBSPEC_FIX")"
-          echo "✅ Project root: $PROJECT_FIX"
-
-          # ── Apply patch script ─────────────────────────────────
-          echo ""
-          echo "🔧 Menjalankan patch script AI..."
-          PATCH_FILE="/tmp/ai_patch_$NEXT_ATTEMPT.sh"
-          echo "$PATCH_SCRIPT" > "$PATCH_FILE"
-          chmod +x "$PATCH_FILE"
-
-          PATCH_LOG="$(bash "$PATCH_FILE" 2>&1 || echo "(patch selesai dengan warning)")"
-          echo "Patch log:"
-          echo "$PATCH_LOG" | tail -30
-
-          # ── Repack ZIP ────────────────────────────────────────
-          FIXED_ZIP_NAME="ai-fixed-attempt${NEXT_ATTEMPT}-$BUILD_ID.zip"
-          FIXED_ZIP_PATH="/tmp/$FIXED_ZIP_NAME"
-
-          echo ""
-          echo "📦 Repack ZIP → $FIXED_ZIP_NAME"
-          cd "$PROJECT_FIX"
-          zip -qr9 "$FIXED_ZIP_PATH" . \
-            -x '*.git*' '*/build/*' '*/.dart_tool/*' '*/node_modules/*' \
-            '*.apk' '*.aab' '*/Pods/*' '*/.gradle/*' \
-            || { echo "❌ Repack gagal"; echo "ai_fix_skipped=true" >> "$GITHUB_OUTPUT"; exit 0; }
-          cd "$GITHUB_WORKSPACE"
-
-          FIXED_SIZE="$(du -sh "$FIXED_ZIP_PATH" | cut -f1)"
-          echo "✅ ZIP fix: $FIXED_ZIP_NAME ($FIXED_SIZE)"
-          rm -rf "$TMPDIR_FIX"
-
-          # ── Push ZIP fix ke GitHub repo ───────────────────────
-          echo ""
-          echo "☁️ Push ZIP fix ke GitHub..."
-
-          ORIG_REPO_PATH="${{ inputs.zip_filename }}"
-          # Path baru untuk ZIP fix: ganti nama file saja, pertahankan folder
-          FIXED_REPO_DIR="$(dirname "$ORIG_REPO_PATH")"
-          FIXED_REPO_PATH="${FIXED_REPO_DIR}/${FIXED_ZIP_NAME}"
-
-          # ── Encode ZIP ke base64 file (hindari "Argument list too long") ──
-          B64_FILE="/tmp/ai_fix_b64_${NEXT_ATTEMPT}.txt"
-          base64 -w 0 "$FIXED_ZIP_PATH" > "$B64_FILE"
-
-          # Cek apakah file sudah ada (butuh SHA untuk update)
-          EXISTING_SHA="$(curl -s \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO_FULL}/contents/${FIXED_REPO_PATH}?ref=${BRANCH}" \
-            | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('sha',''))" 2>/dev/null || echo "")"
-
-          # Build JSON payload — baca b64 dari file, bukan argv (fix Argument list too long)
-          PAYLOAD_FILE="/tmp/ai_fix_payload_${NEXT_ATTEMPT}.json"
-          python3 - "$B64_FILE" "$BRANCH" "$EXISTING_SHA" "$NEXT_ATTEMPT" "$BUILD_ID" <<'PYEOF'
-import json, sys
-b64_file, branch, sha, attempt, build_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-with open(b64_file, 'r') as f:
-    b64_content = f.read().strip()
-payload = {
-    'message': f'bot: AI auto-fix ZIP attempt {attempt} — build {build_id}',
-    'content': b64_content,
-    'branch':  branch,
-}
-if sha:
-    payload['sha'] = sha
-with open('/tmp/ai_fix_payload_out.json', 'w') as out:
-    json.dump(payload, out)
-PYEOF
-          mv /tmp/ai_fix_payload_out.json "$PAYLOAD_FILE"
-          rm -f "$B64_FILE"
-
-          PUSH_RESP="$(curl -s -X PUT \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/${REPO_FULL}/contents/${FIXED_REPO_PATH}" \
-            --data-binary "@$PAYLOAD_FILE")"
-          rm -f "$PAYLOAD_FILE"
-
-          PUSH_SHA="$(echo "$PUSH_RESP" | python3 -c \
-            "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('content',{}).get('sha',''))" 2>/dev/null || echo "")"
-
-          if [ -z "$PUSH_SHA" ]; then
-            echo "⚠️ Push mungkin gagal. Response:"
-            echo "$PUSH_RESP" | head -20
+          echo "=== Running flutter pub get ==="
+          if [ -f "pubspec.yaml" ]; then
+            timeout 120s flutter pub get || echo "⚠️ Gagal download package, coba lanjut..."
           else
-            echo "✅ ZIP fix berhasil di-push ke repo: $FIXED_REPO_PATH"
+            echo "☕ Bukan project Flutter standar, skip pub get!"
           fi
 
-          rm -f "$FIXED_ZIP_PATH" "$PATCH_FILE"
-
-          # ── Simpan output untuk step re-trigger ───────────────
-          echo "ai_fix_done=true"                   >> "$GITHUB_OUTPUT"
-          echo "fixed_zip_repo_path=$FIXED_REPO_PATH" >> "$GITHUB_OUTPUT"
-          echo "next_attempt=$NEXT_ATTEMPT"           >> "$GITHUB_OUTPUT"
-
-      # ──────────────────────────────────────────────────────────
-      # 12. Re-trigger Workflow Build Otomatis setelah AI Fix
-      # ──────────────────────────────────────────────────────────
-      - name: Re-trigger Build setelah AI Fix
-        if: failure() && steps.ai_fix.outputs.ai_fix_done == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # =========================
+      # BUILD APK
+      # =========================
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          FIXED_ZIP="${{ steps.ai_fix.outputs.fixed_zip_repo_path }}"
-          NEXT_ATTEMPT="${{ steps.ai_fix.outputs.next_attempt }}"
-          BUILD_ID="${{ steps.extract.outputs.build_id }}"
-          FLUTTER_VER="${{ inputs.flutter_version }}"
-          BRANCH="${{ github.ref_name }}"
-          REPO_FULL="${{ github.repository }}"
-          WORKFLOW_FILE="build_apk.yml"
+          echo "=== Building APK ==="
+          echo "Mode: ${{ github.event.inputs.build_type }}"
 
-          echo "🚀 Re-trigger build dengan ZIP fix (attempt $NEXT_ATTEMPT)..."
-          echo "   ZIP: $FIXED_ZIP"
+          if [ -f "pubspec.yaml" ]; then
+            echo "🔥 Project Flutter Terdeteksi!"
+            flutter build apk --${{ github.event.inputs.build_type }}
 
-          # Tunggu sebentar agar file sudah tersedia di GitHub
-          sleep 8
-
-          DISPATCH_PAYLOAD="$(python3 - "$FIXED_ZIP" "$BUILD_ID" "$NEXT_ATTEMPT" "$FLUTTER_VER" "$BRANCH" <<'PYEOF'
-import json, sys
-fixed_zip, build_id, next_attempt, flutter_ver, branch = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-payload = {
-  'ref': branch,
-  'inputs': {
-    'zip_filename':      fixed_zip,
-    'build_id':          f'{build_id}-fix{next_attempt}',
-    'flutter_version':   flutter_ver,
-    'ai_fix_attempt':    next_attempt,
-    'original_zip_path': fixed_zip,
-  }
-}
-print(json.dumps(payload))
-PYEOF
-          )"
-
-          DISPATCH_RESP="$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/${REPO_FULL}/actions/workflows/${WORKFLOW_FILE}/dispatches" \
-            -d "$DISPATCH_PAYLOAD")"
-
-          if [ "$DISPATCH_RESP" = "204" ]; then
-            echo "✅ Build baru berhasil di-trigger! (HTTP 204)"
-            echo "   Build ID: ${BUILD_ID}-fix${NEXT_ATTEMPT}"
-            echo "   ZIP: $FIXED_ZIP"
           else
-            echo "⚠️ Dispatch HTTP: $DISPATCH_RESP (bukan 204)"
-            echo "   Bot Telegram akan handle retry via polling."
+            echo "☕ Project Native Android Terdeteksi!"
+            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+
+            if [ -z "$GRADLE_PATH" ]; then
+              echo "❌ ERROR: File 'gradlew' tidak ditemukan!"
+              exit 1
+            fi
+
+            GRADLE_DIR=$(dirname "$GRADLE_PATH")
+            cd "$GRADLE_DIR"
+            chmod +x gradlew
+
+            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+              ./gradlew assembleDebug
+            else
+              ./gradlew assembleRelease
+            fi
+            cd -
           fi
 
-      # ──────────────────────────────────────────────────────────
-      # 13. Kumpulkan & rename APK (hanya jika build sukses)
-      # ──────────────────────────────────────────────────────────
-      - name: Kumpulkan APK
-        id: apk
-        if: success()
-        shell: bash
+      # =========================
+      # CHECK APK
+      # =========================
+      - name: Check APK Output
         run: |
-          set -euo pipefail
-          APK_DIR="$PROJECT_DIR/build/app/outputs/flutter-apk"
-          BUILD_ID="${{ steps.extract.outputs.build_id }}"
+          echo "=== APK Output Scanning ==="
+          find $GITHUB_WORKSPACE -name "*.apk"
 
-          BEST=""
-          for CANDIDATE in \
-            "$APK_DIR/app-arm64-v8a-release.apk" \
-            "$APK_DIR/app-armeabi-v7a-release.apk" \
-            "$APK_DIR/app-x86_64-release.apk" \
-            "$APK_DIR/app-release.apk"; do
-            [ -f "$CANDIDATE" ] && { BEST="$CANDIDATE"; break; }
-          done
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
 
-          [ -z "$BEST" ] && BEST="$(find "$APK_DIR" -name '*.apk' 2>/dev/null | head -1)"
-
-          if [ -z "$BEST" ]; then
-            echo "❌ Tidak ada APK!"
-            find "$PROJECT_DIR/build" -name '*.apk' 2>/dev/null || true
+          if [ -z "$APK_FOUND" ]; then
+            echo "Error: APK tidak ditemukan!"
             exit 1
           fi
 
-          APK_NAME="flutter-release-${BUILD_ID}.apk"
-          cp "$BEST" "$GITHUB_WORKSPACE/$APK_NAME"
-          SIZE="$(du -sh "$GITHUB_WORKSPACE/$APK_NAME" | cut -f1)"
+          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
+          echo "✅ APK ditemukan: $APK_PATH"
 
-          echo "✅ APK: $APK_NAME ($SIZE)"
-          echo "apk_name=$APK_NAME"                    >> "$GITHUB_OUTPUT"
-          echo "apk_path=$GITHUB_WORKSPACE/$APK_NAME"  >> "$GITHUB_OUTPUT"
-          echo "apk_size=$SIZE"                        >> "$GITHUB_OUTPUT"
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
-      # ──────────────────────────────────────────────────────────
-      # 14. Upload ke GitHub Release
-      # ──────────────────────────────────────────────────────────
-      - name: Upload Release
-        if: success() && steps.apk.outputs.apk_path != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "build-${{ steps.extract.outputs.build_id }}"
-          name:     "Build ${{ steps.extract.outputs.build_id }}"
-          body: |
-            ✅ Build berhasil
+          echo ""
+          echo "=== APK Size ==="
+          ls -lh "$APK_FOUND"
 
-            ZIP      : ${{ inputs.zip_filename }}
-            APK      : ${{ steps.apk.outputs.apk_name }}
-            Size     : ${{ steps.apk.outputs.apk_size }}
-            Flutter  : ${{ steps.ver.outputs.flutter_version }} / ${{ steps.ver.outputs.flutter_channel }}
-            Java     : ${{ steps.ver.outputs.java_version }}
-            AI Fix # : ${{ inputs.ai_fix_attempt }}
-            SHA      : ${{ github.sha }}
-          files: "${{ steps.apk.outputs.apk_path }}"
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-
-      # ──────────────────────────────────────────────────────────
-      # 15. Upload Artifact (cadangan, bisa didownload bot)
-      # ──────────────────────────────────────────────────────────
-      - name: Upload Artifact
-        if: success() && steps.apk.outputs.apk_path != ''
+      # =========================
+      # UPLOAD APK
+      # =========================
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name:            "APK-${{ steps.extract.outputs.build_id }}"
-          path:            "${{ steps.apk.outputs.apk_path }}"
-          retention-days:  7
+          name: flutter-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
+          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
+          retention-days: 1
+          if-no-files-found: error
