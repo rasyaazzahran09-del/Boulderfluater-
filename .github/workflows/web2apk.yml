@@ -16,34 +16,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      PUB_CACHE: /home/runner/.pub-cache
-      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Xmx2g"
-
     steps:
-      - name: Cache Flutter & Pub
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.pub-cache
-            /opt/hostedtoolcache/flutter
-          key: ${{ runner.os }}-flutter-3.32.0-web2apk-v2
-          restore-keys: |
-            ${{ runner.os }}-flutter-3.32.0-
-            ${{ runner.os }}-flutter-
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-web2apk-v2
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -52,291 +26,210 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.0'
+          flutter-version: '3.44.0'
           channel: stable
           cache: true
 
       - name: Create Flutter Project
         run: |
           APP_NAME="${{ github.event.inputs.app_name }}"
-          PKG=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_' | head -c 30)
-          # Pastikan package name valid (tidak boleh diawali angka)
-          if [[ "$PKG" =~ ^[0-9] ]]; then PKG="app_${PKG}"; fi
-          if [ -z "$PKG" ]; then PKG="mywebapp"; fi
+          PKG=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_')
           flutter create --org com.webapk --project-name "$PKG" myapp
-          echo "PKG=$PKG" >> $GITHUB_ENV
 
-      - name: Add Dependencies
+      - name: Add Assets and Dependencies
         run: |
           cd myapp
           flutter pub add webview_flutter
           flutter pub add flutter_launcher_icons
           flutter pub add connectivity_plus
+          echo "  assets:" >> pubspec.yaml
+          echo "    - assets/icon/" >> pubspec.yaml
 
       - name: Write main.dart
         run: |
           APP_NAME="${{ github.event.inputs.app_name }}"
           WEB_URL="${{ github.event.inputs.web_url }}"
-          
-          # Escape karakter khusus untuk sed
-          APP_NAME_ESC=$(printf '%s\n' "$APP_NAME" | sed 's/[[\.*^$()+?{|]/\\&/g')
-          WEB_URL_ESC=$(printf '%s\n' "$WEB_URL" | sed 's/[[\.*^$()+?{|]/\\&/g')
 
-          cat > myapp/lib/main.dart << 'DARTEOF'
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:webview_flutter/webview_flutter.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'dart:async';
+          cat > myapp/lib/main.dart << 'DART'
+          import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+          import 'package:connectivity_plus/connectivity_plus.dart';
+          import 'dart:async';
 
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.dark,
-  ));
-  runApp(const MyApp());
-}
+          void main() {
+            WidgetsFlutterBinding.ensureInitialized();
+            SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness: Brightness.dark,
+            ));
+            runApp(const MyApp());
+          }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'APP_NAME_PLACEHOLDER',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.blue),
-      home: const SplashScreen(),
-    );
-  }
-}
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: '$APP_NAME',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(useMaterial3: true, primarySwatch: Colors.blue),
+                home: const SplashScreen(),
+              );
+            }
+          }
 
-class SplashScreen extends StatefulWidget {
-  const SplashScreen({super.key});
-  @override
-  State<SplashScreen> createState() => _SplashScreenState();
-}
+          class SplashScreen extends StatefulWidget {
+            const SplashScreen({super.key});
+            @override
+            State<SplashScreen> createState() => _SplashScreenState();
+          }
 
-class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMixin {
-  late AnimationController _fadeController;
-  late AnimationController _scaleController;
-  late Animation<double> _fadeAnim;
-  late Animation<double> _scaleAnim;
+          class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMixin {
+            late AnimationController _fadeController;
+            late AnimationController _scaleController;
+            late AnimationController _dotController;
+            late Animation<double> _fadeAnim;
+            late Animation<double> _scaleAnim;
+            late Animation<double> _dot1Anim;
+            late Animation<double> _dot2Anim;
+            late Animation<double> _dot3Anim;
+            bool _isChecking = false;
+            bool _dialogShown = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _fadeController = AnimationController(vsync: this, duration: const Duration(milliseconds: 600));
-    _scaleController = AnimationController(vsync: this, duration: const Duration(milliseconds: 600));
-    _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(CurvedAnimation(parent: _fadeController, curve: Curves.easeOut));
-    _scaleAnim = Tween<double>(begin: 0.8, end: 1.0).animate(CurvedAnimation(parent: _scaleController, curve: Curves.easeOutBack));
-    _fadeController.forward();
-    _scaleController.forward();
-    Timer(const Duration(milliseconds: 1500), () => _checkAndNavigate());
-  }
+            @override
+            void initState() {
+              super.initState();
+              _fadeController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+              _scaleController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+              _dotController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))..repeat();
 
-  Future<void> _checkAndNavigate() async {
-    final results = await Connectivity().checkConnectivity();
-    if (!mounted) return;
-    if (results.every((r) => r == ConnectivityResult.none)) {
-      _showNoConnectionDialog();
-    } else {
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const WebViewPage()));
-    }
-  }
+              _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(CurvedAnimation(parent: _fadeController, curve: Curves.easeOut));
+              _scaleAnim = Tween<double>(begin: 0.75, end: 1.0).animate(CurvedAnimation(parent: _scaleController, curve: Curves.easeOutBack));
 
-  void _showNoConnectionDialog() {
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Tidak Ada Koneksi'),
-        content: const Text('Periksa koneksi internet kamu, lalu coba lagi.'),
-        actions: [
-          TextButton(
-            onPressed: () { Navigator.pop(ctx); _checkAndNavigate(); },
-            child: const Text('Coba Lagi'),
-          )
-        ],
-      ),
-    );
-  }
+              _dot1Anim = TweenSequence([
+                TweenSequenceItem(tween: Tween<double>(begin: 0.3, end: 1.0), weight: 1),
+                TweenSequenceItem(tween: Tween<double>(begin: 1.0, end: 0.3), weight: 1),
+                TweenSequenceItem(tween: ConstantTween<double>(0.3), weight: 1),
+              ]).animate(CurvedAnimation(parent: _dotController, curve: Curves.easeInOut));
 
-  @override
-  void dispose() { _fadeController.dispose(); _scaleController.dispose(); super.dispose(); }
+              _dot2Anim = TweenSequence([
+                TweenSequenceItem(tween: ConstantTween<double>(0.3), weight: 1),
+                TweenSequenceItem(tween: Tween<double>(begin: 0.3, end: 1.0), weight: 1),
+                TweenSequenceItem(tween: Tween<double>(begin: 1.0, end: 0.3), weight: 1),
+              ]).animate(CurvedAnimation(parent: _dotController, curve: Curves.easeInOut));
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Theme.of(context).colorScheme.surface,
-      body: Center(
-        child: FadeTransition(
-          opacity: _fadeAnim,
-          child: ScaleTransition(
-            scale: _scaleAnim,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 90, height: 90,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 20, offset: const Offset(0, 8))],
-                    image: const DecorationImage(image: AssetImage('assets/icon/icon.png'), fit: BoxFit.cover),
-                  ),
+              _dot3Anim = TweenSequence([
+                TweenSequenceItem(tween: Tween<double>(begin: 1.0, end: 0.3), weight: 1),
+                TweenSequenceItem(tween: ConstantTween<double>(0.3), weight: 1),
+                TweenSequenceItem(tween: Tween<double>(begin: 0.3, end: 1.0), weight: 1),
+              ]).animate(CurvedAnimation(parent: _dotController, curve: Curves.easeInOut));
+
+              _fadeController.forward();
+              _scaleController.forward();
+              Timer(const Duration(milliseconds: 1500), () => _checkConnectionAndNavigate());
+            }
+
+            Future<void> _checkConnectionAndNavigate() async {
+              if (_isChecking) return;
+              setState(() => _isChecking = true);
+              await Future.delayed(const Duration(milliseconds: 1000));
+              var connectivityResult = await (Connectivity().checkConnectivity());
+              if (connectivityResult.every((r) => r == ConnectivityResult.none)) {
+                setState(() => _isChecking = false);
+                _showNoConnectionDialog();
+              } else {
+                if (mounted) {
+                  Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const WebViewPage()));
+                }
+              }
+            }
+
+            void _showNoConnectionDialog() {
+              if (!mounted || _dialogShown) return;
+              setState(() => _dialogShown = true);
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (context) => AlertDialog(
+                  title: const Text('Gagal Terhubung'),
+                  content: const Text('Tidak ada koneksi internet.'),
+                  actions: [
+                    TextButton(onPressed: () { Navigator.pop(context); setState(() => _dialogShown = false); _checkConnectionAndNavigate(); }, child: const Text('Coba Lagi'))
+                  ],
                 ),
-                const SizedBox(height: 20),
-                Text('APP_NAME_PLACEHOLDER', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
-                const SizedBox(height: 12),
-                const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 2.5)),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
+              );
+            }
 
-class WebViewPage extends StatefulWidget {
-  const WebViewPage({super.key});
-  @override
-  State<WebViewPage> createState() => _WebViewPageState();
-}
+            @override
+            void dispose() { _fadeController.dispose(); _scaleController.dispose(); _dotController.dispose(); super.dispose(); }
 
-class _WebViewPageState extends State<WebViewPage> {
-  late final WebViewController _controller;
-  bool _isLoading = true;
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(body: Center(child: Text('$APP_NAME', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))));
+            }
+          }
 
-  @override
-  void initState() {
-    super.initState();
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(Colors.white)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: (_) => setState(() => _isLoading = true),
-          onPageFinished: (_) => setState(() => _isLoading = false),
-          onWebResourceError: (error) => setState(() => _isLoading = false),
-        ),
-      )
-      ..loadRequest(Uri.parse('WEB_URL_PLACEHOLDER'));
-  }
+          class WebViewPage extends StatefulWidget {
+            const WebViewPage({super.key});
+            @override
+            State<WebViewPage> createState() => _WebViewPageState();
+          }
 
-  @override
-  Widget build(BuildContext context) {
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (bool didPop, _) async {
-        if (await _controller.canGoBack()) {
-          _controller.goBack();
-        }
-      },
-      child: Scaffold(
-        body: SafeArea(
-          child: Stack(
-            children: [
-              WebViewWidget(controller: _controller),
-              if (_isLoading)
-                const Center(child: CircularProgressIndicator()),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-DARTEOF
+          class _WebViewPageState extends State<WebViewPage> {
+            late final WebViewController _controller;
+            @override
+            void initState() {
+              super.initState();
+              _controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..loadRequest(Uri.parse('$WEB_URL'));
+            }
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(body: SafeArea(child: WebViewWidget(controller: _controller)));
+            }
+          }
+          DART
 
-          # Replace placeholder dengan nilai asli
-          sed -i "s|APP_NAME_PLACEHOLDER|${APP_NAME_ESC}|g" myapp/lib/main.dart
-          sed -i "s|WEB_URL_PLACEHOLDER|${WEB_URL_ESC}|g" myapp/lib/main.dart
+          sed -i "s#\$APP_NAME#$APP_NAME#g" myapp/lib/main.dart
+          sed -i "s#\$WEB_URL#$WEB_URL#g" myapp/lib/main.dart
 
-      - name: Fix Android Config
+      - name: Fix Android Permissions
         run: |
           APP_NAME="${{ github.event.inputs.app_name }}"
           MANIFEST="myapp/android/app/src/main/AndroidManifest.xml"
-          
-          # Tambah internet permission
-          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.INTERNET"\/>' "$MANIFEST"
-          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>' "$MANIFEST"
-          
-          # Ubah label app
-          sed -i "s/android:label=\"[^\"]*\"/android:label=\"${APP_NAME}\"/" "$MANIFEST"
-          
-          # Enable cleartext traffic untuk http://
-          sed -i 's/<application/<application android:usesCleartextTraffic="true"/' "$MANIFEST"
-          
-          # Set minSdkVersion agar kompatibel luas
-          GRADLE_APP="myapp/android/app/build.gradle"
-          if [ -f "$GRADLE_APP" ]; then
-            sed -i 's/minSdk = [0-9]*/minSdk = 21/' "$GRADLE_APP" 2>/dev/null || true
-            sed -i 's/minSdkVersion [0-9]*/minSdkVersion 21/' "$GRADLE_APP" 2>/dev/null || true
-          fi
+          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.INTERNET"\/>' $MANIFEST
+          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>' $MANIFEST
+          sed -i "s/android:label=\"[^\"]*\"/android:label=\"$APP_NAME\"/" $MANIFEST
 
-      - name: Add Assets & Download Icon
+      - name: Download Icon
         run: |
           mkdir -p myapp/assets/icon
-          
-          # Tambah assets ke pubspec.yaml jika belum ada
-          if ! grep -q "assets:" myapp/pubspec.yaml; then
-            printf '\nflutter:\n  uses-material-design: true\n  assets:\n    - assets/icon/\n' >> myapp/pubspec.yaml
-          elif ! grep -q "assets/icon" myapp/pubspec.yaml; then
-            sed -i '/assets:/a\    - assets\/icon\/' myapp/pubspec.yaml
-          fi
-          
-          # Download icon dengan retry
-          sudo apt-get install -y imagemagick -q 2>/dev/null
-          for i in 1 2 3; do
-            if curl -L \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/octet-stream" \
-              --connect-timeout 30 \
-              --retry 2 \
-              "${{ github.event.inputs.icon_url }}" \
-              -o myapp/assets/icon/icon_raw \
-              --fail 2>/dev/null; then
-              break
-            fi
-            echo "Retry $i downloading icon..."
-            sleep 3
-          done
-          
-          # Convert icon ke PNG 1024x1024
-          if [ -f "myapp/assets/icon/icon_raw" ]; then
-            convert myapp/assets/icon/icon_raw \
-              -resize 1024x1024^ \
-              -gravity center \
-              -extent 1024x1024 \
-              myapp/assets/icon/icon.png 2>/dev/null || \
-            cp myapp/assets/icon/icon_raw myapp/assets/icon/icon.png
-          fi
+          sudo apt-get install -y imagemagick
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.event.inputs.icon_url }}" \
+            -o myapp/assets/icon/icon_raw
+          convert myapp/assets/icon/icon_raw -resize 1024x1024 myapp/assets/icon/icon.png
 
-      - name: Generate Launcher Icons
+      - name: Generate Icons
         run: |
           cat > myapp/flutter_launcher_icons.yaml << 'EOF'
-flutter_launcher_icons:
-  android: true
-  ios: false
-  image_path: "assets/icon/icon.png"
-  min_sdk_android: 21
-  adaptive_icon_background: "#ffffff"
-  adaptive_icon_foreground: "assets/icon/icon.png"
-EOF
-          cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml 2>&1 | tail -10
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: "assets/icon/icon.png"
+            min_sdk_android: 21
+          EOF
+          cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
 
-      - name: Build APK Release
-        run: |
-          cd myapp
-          flutter pub get --no-precompile
-          flutter build apk --release --no-tree-shake-icons 2>&1
+      - name: Build APK
+        run: cd myapp && flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: web2apk-release-${{ github.run_id }}
+          name: web2apk-release
           path: myapp/build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 1
-          if-no-files-found: error
