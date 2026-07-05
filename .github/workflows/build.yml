@@ -120,26 +120,21 @@ jobs:
             timeout 120s flutter pub get || echo "⚠️ Lanjut..."
           fi
 
-      - name: Build APK (Flutter)
+      - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          set -o pipefail
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "❌ pubspec.yaml tidak ditemukan. File YAML ini khusus project Flutter."
-            echo "Untuk project Android native/Gradle murni (tanpa Flutter), bot akan"
-            echo "otomatis memakai workflow terpisah: native-build.yml"
-            exit 1
+          if [ -f "pubspec.yaml" ]; then
+            flutter build apk --${{ github.event.inputs.build_type }}
+          else
+            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+            GRADLE_DIR=$(dirname "$GRADLE_PATH")
+            cd "$GRADLE_DIR" && chmod +x gradlew
+            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+              ./gradlew assembleDebug
+            else
+              ./gradlew assembleRelease
+            fi
           fi
-          flutter build apk --${{ github.event.inputs.build_type }} 2>&1 | tee $GITHUB_WORKSPACE/full_build_log.txt
-
-      - name: Always upload full build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: full-build-log-${{ github.event.inputs.tag }}
-          path: full_build_log.txt
-          retention-days: 3
-          if-no-files-found: ignore
 
       - name: Check APK Output
         run: |
