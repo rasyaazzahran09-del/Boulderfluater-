@@ -1,0 +1,140 @@
+name: Build Native Android (Gradle / C++ NDK)
+
+# File ini SENGAJA terpisah dari build.yml (Flutter) dan web2apk.yml (Web2APK).
+# Dipakai khusus untuk project Android native: Java/Kotlin murni (Gradle only)
+# atau project dengan kode native C++ via Android NDK/CMake (mis. raylib, dsb).
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "URL download ZIP project native/Gradle"
+        required: true
+      tag:
+        description: "Tag build"
+        required: true
+      build_type:
+        description: "debug / release"
+        required: true
+        default: "release"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - name: Download ZIP project
+        run: |
+          echo "=== Downloading ZIP ==="
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.event.inputs.zip_url }}" \
+            -o project.zip \
+            -w "\n=== HTTP Status: %{http_code} ===\n"
+          echo ""
+          ls -lh project.zip
+          file project.zip
+
+      - name: Extract ZIP
+        run: |
+          echo "=== Validating ZIP ==="
+          if ! unzip -t project.zip > /dev/null 2>&1; then
+            echo "❌ File bukan ZIP valid!"
+            exit 1
+          fi
+          echo "✅ ZIP valid"
+
+          unzip -q project.zip -d project_raw
+
+          SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
+          FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
+
+          if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
+            PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
+          else
+            PROJECT_DIR="project_raw"
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+
+      - name: Detect project kind
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if find . -iname "CMakeLists.txt" | grep -q . || find . -iname "Android.mk" | grep -q .; then
+            echo "KIND=native-cpp" >> $GITHUB_ENV
+            echo "🔎 Terdeteksi project native C++ (NDK) - CMake/Android.mk ditemukan"
+          else
+            echo "KIND=gradle-only" >> $GITHUB_ENV
+            echo "🔎 Terdeteksi project Android Gradle biasa (Java/Kotlin, tanpa native code)"
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK & CMake
+        if: env.KIND == 'native-cpp'
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "ndk;26.3.11579264" "cmake;3.22.1" > /dev/null 2>&1
+          echo "✅ NDK & CMake terpasang"
+
+      - name: Grant execute to gradlew
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+          if [ -z "$GRADLE_PATH" ]; then
+            echo "❌ gradlew tidak ditemukan di project ini!"
+            echo "Project harus berupa Android Studio project standar (ada gradlew)."
+            exit 1
+          fi
+          GRADLE_DIR=$(dirname "$GRADLE_PATH")
+          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
+          chmod +x "$GRADLE_PATH"
+
+      - name: Build APK (Gradle)
+        working-directory: ${{ env.PROJECT_DIR }}/${{ env.GRADLE_DIR }}
+        run: |
+          set -o pipefail
+          echo "=== Mulai build (${{ github.event.inputs.build_type }}) ==="
+          if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+            ./gradlew assembleDebug --stacktrace 2>&1 | tee $GITHUB_WORKSPACE/full_build_log.txt
+          else
+            ./gradlew assembleRelease --stacktrace 2>&1 | tee $GITHUB_WORKSPACE/full_build_log.txt
+          fi
+
+      - name: Always upload full build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-build-log-${{ github.event.inputs.tag }}
+          path: full_build_log.txt
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Check APK Output
+        run: |
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          if [ -z "$APK_FOUND" ]; then
+            echo "❌ Tidak ada file .apk yang dihasilkan!"
+            exit 1
+          fi
+          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
+          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
+          retention-days: 1
+          if-no-files-found: error
