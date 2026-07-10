@@ -1,0 +1,137 @@
+name: Build Android Native APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "URL download ZIP project Android Native"
+        required: true
+      tag:
+        description: "Tag build"
+        required: true
+      build_type:
+        description: "debug / release"
+        required: true
+        default: "release"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download ZIP project
+        run: |
+          echo "=== Downloading ZIP ==="
+          echo "URL: ${{ github.event.inputs.zip_url }}"
+
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.event.inputs.zip_url }}" \
+            -o project.zip \
+            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
+
+          echo ""
+          echo "=== File Info ==="
+          ls -lh project.zip
+          echo ""
+          echo "=== File Type ==="
+          file project.zip
+          echo ""
+          echo "=== First Bytes ==="
+          xxd project.zip | head -2
+
+      - name: Extract ZIP
+        run: |
+          echo "=== Validating ZIP ==="
+          if ! unzip -t project.zip > /dev/null 2>&1; then
+            echo "❌ File bukan ZIP valid!"
+            echo ""
+            echo "=== Isi file ==="
+            cat project.zip
+            exit 1
+          fi
+          echo "✅ ZIP valid"
+
+          echo ""
+          echo "=== Extracting ZIP ==="
+          unzip -q project.zip -d project_raw
+
+          echo ""
+          echo "=== Mengunci Project Dir ==="
+          SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
+          FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
+
+          if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
+            PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
+          else
+            PROJECT_DIR="project_raw"
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Locate Gradle Wrapper
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "=== Mencari gradlew (project Android Native) ==="
+          GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+
+          if [ -z "$GRADLE_PATH" ]; then
+            echo "❌ gradlew tidak ditemukan. Project ini bukan project Android Native (Gradle) yang valid."
+            exit 1
+          fi
+
+          GRADLE_DIR=$(dirname "$GRADLE_PATH")
+          echo "✅ gradlew ditemukan di: $GRADLE_DIR"
+          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
+          chmod +x "$GRADLE_PATH"
+
+      - name: Lint Project (best-effort)
+        working-directory: ${{ env.PROJECT_DIR }}/${{ env.GRADLE_DIR }}
+        run: |
+          echo "[RESULT_ANALYZE]"
+          ./gradlew lint > lint_report.txt 2>&1 || true
+          cat lint_report.txt
+          echo "[END_RESULT_ANALYZE]"
+          rm -f lint_report.txt
+        continue-on-error: true
+
+      - name: Build APK (Native Gradle)
+        working-directory: ${{ env.PROJECT_DIR }}/${{ env.GRADLE_DIR }}
+        run: |
+          if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+            ./gradlew assembleDebug --stacktrace
+          else
+            ./gradlew assembleRelease --stacktrace
+          fi
+
+      - name: Check APK Output
+        run: |
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
+          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
+          retention-days: 1
+          if-no-files-found: error
