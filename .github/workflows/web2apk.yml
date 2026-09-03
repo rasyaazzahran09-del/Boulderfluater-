@@ -16,7 +16,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
     steps:
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -27,71 +26,29 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          # TIDAK pin versi spesifik lagi — pakai stable terbaru supaya setup
-          # tidak pernah 404 ("version not exist") dan template `flutter create`
-          # selalu 100% cocok dengan SDK yang dipakai build.
+          flutter-version: '3.44.0'
           channel: stable
           cache: true
-
-      - name: Cache Gradle & Pub (percepat build berikutnya 3-5 menit)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            ~/.pub-cache/hosted
-          key: web2apk-${{ runner.os }}-v2
-          restore-keys: web2apk-${{ runner.os }}-
 
       - name: Create Flutter Project
         run: |
           APP_NAME="${{ github.event.inputs.app_name }}"
           PKG=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_')
-          # FIX: nama package Dart/Gradle tidak boleh KOSONG dan tidak boleh
-          # diawali angka — kalau tidak, `flutter create` langsung error.
-          case "$PKG" in
-            ''|[0-9]*) PKG="app$PKG" ;;
-          esac
-          echo "Project package: $PKG"
-          # FIX: --platforms android → tidak generate ios/web/macos/windows/linux
-          # yang tidak dipakai (create jauh lebih cepat).
-          flutter create --platforms android --org com.webapk --project-name "$PKG" myapp
+          flutter create --org com.webapk --project-name "$PKG" myapp
 
-      - name: Add Dependencies
+      - name: Add Assets and Dependencies
         run: |
           cd myapp
-          # FIX: semua dependency dalam SATU perintah pub add (1x resolve saja,
-          # bukan 3x) → proses jadi lebih cepat dan tidak dobel-download.
-          flutter pub add webview_flutter connectivity_plus
-          flutter pub add dev:flutter_launcher_icons
+          flutter pub add webview_flutter
+          flutter pub add flutter_launcher_icons
+          flutter pub add connectivity_plus
+          echo "  assets:" >> pubspec.yaml
+          echo "    - assets/icon/" >> pubspec.yaml
 
       - name: Write main.dart
         run: |
           APP_NAME="${{ github.event.inputs.app_name }}"
           WEB_URL="${{ github.event.inputs.web_url }}"
-
-          # ================================================================
-          # FIX PENTING (penyebab build gagal sebelumnya):
-          # Dulu APP_NAME & WEB_URL di-inject lewat `sed` langsung ke dalam
-          # main.dart. Kalau nama aplikasi mengandung karakter spesial
-          # (tanda kutip ', #, &, /, dll) maka hasil Dart-nya SYNTAX ERROR
-          # dan sed-nya pun bisa rusak. Sekarang nilainya DI-ENCODE BASE64
-          # (karakter base64 100% aman untuk Dart), lalu di-decode runtime.
-          # Jadi NAMA APLIKASI DENGAN KARAKTER APAPUN TIDAK AKAN PERNAH
-          # bikin build error lagi.
-          # ================================================================
-          NAME_B64=$(printf '%s' "$APP_NAME" | base64 -w0)
-          URL_B64=$(printf '%s' "$WEB_URL" | base64 -w0)
-
-          cat > myapp/lib/app_config.dart << EOF
-          import 'dart:convert' show base64, utf8;
-
-          const String _kNameB64 = '$NAME_B64';
-          const String _kUrlB64 = '$URL_B64';
-
-          final String kAppName = utf8.decode(base64.decode(_kNameB64));
-          final String kWebUrl = utf8.decode(base64.decode(_kUrlB64));
-          EOF
 
           cat > myapp/lib/main.dart << 'DART'
           import 'package:flutter/material.dart';
@@ -99,8 +56,6 @@ jobs:
           import 'package:webview_flutter/webview_flutter.dart';
           import 'package:connectivity_plus/connectivity_plus.dart';
           import 'dart:async';
-
-          import 'app_config.dart';
 
           void main() {
             WidgetsFlutterBinding.ensureInitialized();
@@ -116,7 +71,7 @@ jobs:
             @override
             Widget build(BuildContext context) {
               return MaterialApp(
-                title: kAppName,
+                title: '$APP_NAME',
                 debugShowCheckedModeBanner: false,
                 theme: ThemeData(useMaterial3: true, primarySwatch: Colors.blue),
                 home: const SplashScreen(),
@@ -211,7 +166,7 @@ jobs:
 
             @override
             Widget build(BuildContext context) {
-              return Scaffold(body: Center(child: Text(kAppName, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))));
+              return Scaffold(body: Center(child: Text('$APP_NAME', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))));
             }
           }
 
@@ -228,12 +183,7 @@ jobs:
               super.initState();
               _controller = WebViewController()
                 ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                ..setNavigationDelegate(
-                  NavigationDelegate(
-                    onPageFinished: (url) {},
-                  ),
-                )
-                ..loadRequest(Uri.parse(kWebUrl));
+                ..loadRequest(Uri.parse('$WEB_URL'));
             }
             @override
             Widget build(BuildContext context) {
@@ -242,82 +192,27 @@ jobs:
           }
           DART
 
-          # Sanity check: tampilkan hasil config (base64) untuk debugging
-          echo "=== app_config.dart ==="
-          cat myapp/lib/app_config.dart
+          sed -i "s#\$APP_NAME#$APP_NAME#g" myapp/lib/main.dart
+          sed -i "s#\$WEB_URL#$WEB_URL#g" myapp/lib/main.dart
 
-      - name: Fix Android Permissions & Localhost Support
+      - name: Fix Android Permissions
         run: |
           APP_NAME="${{ github.event.inputs.app_name }}"
           MANIFEST="myapp/android/app/src/main/AndroidManifest.xml"
-
-          # Permission internet (dibutuhkan release build)
-          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.INTERNET"/>' $MANIFEST
-          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>' $MANIFEST
-
-          # ================================================================
-          # FIX: SUPPORT http://localhost:500 / 127.0.0.1 / IP LAN / PORT BEBAS
-          # Android memblokir trafik cleartext (http) secara default sejak
-          # API 28 — WebView akan blank/error kalau URL website-nya http.
-          # usesCleartextTraffic=true + network_security_config mengizinkan:
-          #   - http://localhost:500, http://127.0.0.1:PORT, IP LAN
-          #   - https dengan sertifikat self-signed yang di-install user
-          # ================================================================
-          sed -i 's/<application\b/<application android:usesCleartextTraffic="true" android:networkSecurityConfig="@xml\/network_security_config"/' $MANIFEST
-
-          mkdir -p myapp/android/app/src/main/res/xml
-          cat > myapp/android/app/src/main/res/xml/network_security_config.xml << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <network-security-config>
-              <base-config cleartextTrafficPermitted="true">
-                  <trust-anchors>
-                      <certificates src="system" />
-                      <certificates src="user" />
-                  </trust-anchors>
-              </base-config>
-          </network-security-config>
-          EOF
-
-          # FIX: label nama app di manifest sekarang di-escape dengan benar
-          # (XML escape dulu, lalu escape karakter spesial sed) — nama app
-          # dengan &, <, >, " tidak akan merusak manifest lagi.
-          XML_NAME=$(printf '%s' "$APP_NAME" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g')
-          XML_NAME_SED=$(printf '%s' "$XML_NAME" | sed -e 's/[&/\\]/\\&/g')
-          sed -i "s/android:label=\"[^\"]*\"/android:label=\"$XML_NAME_SED\"/" $MANIFEST
-
-          echo "=== AndroidManifest.xml ==="
-          cat $MANIFEST
+          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.INTERNET"\/>' $MANIFEST
+          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>' $MANIFEST
+          sed -i "s/android:label=\"[^\"]*\"/android:label=\"$APP_NAME\"/" $MANIFEST
 
       - name: Download Icon
         run: |
           mkdir -p myapp/assets/icon
-          # FIX: imagemagick USUALLY sudah ada di runner — hanya install kalau
-          # memang tidak ada (hemat 20-60 detik per build).
-          if ! command -v convert >/dev/null 2>&1; then
-            sudo apt-get update -qq >/dev/null 2>&1 || true
-            sudo apt-get install -y -qq imagemagick >/dev/null 2>&1 || true
-          fi
-
-          # FIX: curl pakai --fail --retry + timeout supaya tidak menggantung,
-          # dan error download TIDAK langsung mematikan build (ada fallback).
-          curl -sSL --fail --retry 3 --retry-delay 2 --max-time 120 \
+          sudo apt-get install -y imagemagick
+          curl -L \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.icon_url }}" \
-            -o myapp/assets/icon/icon_raw || echo "⚠️ Download icon gagal (pakai fallback)"
-
-          # FIX: kalau icon gagal download / format tidak didukung / corrupt,
-          # OTOMATIS generate icon default — build TIDAK PERNAH gagal karena icon.
-          if [ -s myapp/assets/icon/icon_raw ] && \
-             convert myapp/assets/icon/icon_raw -resize 1024x1024^ -gravity center -extent 1024x1024 myapp/assets/icon/icon.png 2>/dev/null; then
-            echo "✅ Icon user dipakai"
-          else
-            echo "⚠️ Icon tidak valid — generate icon default gradient"
-            convert -size 1024x1024 gradient:'#2563EB'-'#7C3AED' myapp/assets/icon/icon.png 2>/dev/null || \
-              echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" | base64 -d > myapp/assets/icon/icon.png
-          fi
-          rm -f myapp/assets/icon/icon_raw
-          ls -la myapp/assets/icon/
+            -o myapp/assets/icon/icon_raw
+          convert myapp/assets/icon/icon_raw -resize 1024x1024 myapp/assets/icon/icon.png
 
       - name: Generate Icons
         run: |
@@ -338,5 +233,3 @@ jobs:
         with:
           name: web2apk-release
           path: myapp/build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 1
-          if-no-files-found: error
