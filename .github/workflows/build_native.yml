@@ -32,18 +32,22 @@ jobs:
           echo "=== Downloading ZIP ==="
           echo "URL: ${{ github.event.inputs.zip_url }}"
 
-          # FIX: tambah --fail --retry supaya download yang gagal tidak
-          # menghasilkan file HTML error page yang diteruskan ke step berikutnya.
-          curl -sSL --fail --retry 3 --retry-delay 2 --max-time 300 \
+          curl -L \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
             -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n"
+            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
 
           echo ""
           echo "=== File Info ==="
           ls -lh project.zip
+          echo ""
+          echo "=== File Type ==="
+          file project.zip
+          echo ""
+          echo "=== First Bytes ==="
+          xxd project.zip | head -2
 
       - name: Extract ZIP
         run: |
@@ -52,7 +56,7 @@ jobs:
             echo "❌ File bukan ZIP valid!"
             echo ""
             echo "=== Isi file ==="
-            head -c 500 project.zip
+            cat project.zip
             exit 1
           fi
           echo "✅ ZIP valid"
@@ -82,13 +86,6 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Setup Gradle Cache (percepat build berikutnya)
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          # Cache dependency + wrapper otomatis ON — build ke-2 dst jauh lebih
-          # cepat karena tidak download ulang semua dependency Gradle.
-          cache-read-only: false
-
       - name: Locate Gradle Wrapper
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -105,27 +102,15 @@ jobs:
           echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
           chmod +x "$GRADLE_PATH"
 
-          # FIX: gradlew yang di-edit di Windows mengandung CRLF → bash error
-          # "bad interpreter: /bin/bash^M". Normalisasi dulu supaya aman.
-          sed -i 's/\r$//' "$GRADLE_PATH" 2>/dev/null || true
-          [ -f "$GRADLE_DIR/gradle/wrapper/gradle-wrapper.properties" ] && \
-            sed -i 's/\r$//' "$GRADLE_DIR/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null || true
-
-          # FIX: tuning Gradle — build paralel + build cache → build jauh lebih cepat.
-          if [ ! -f "$GRADLE_DIR/gradle.properties" ]; then
-            touch "$GRADLE_DIR/gradle.properties"
-          fi
-          if ! grep -q "org.gradle.parallel" "$GRADLE_DIR/gradle.properties"; then
-            printf '\norg.gradle.parallel=true\n' >> "$GRADLE_DIR/gradle.properties"
-          fi
-          if ! grep -q "org.gradle.caching" "$GRADLE_DIR/gradle.properties"; then
-            printf 'org.gradle.caching=true\n' >> "$GRADLE_DIR/gradle.properties"
-          fi
-
-      # FIX: step "Lint Project (best-effort)" lama DIHAPUS — makan waktu 1-3
-      # menit per build padahal hasilnya tidak pernah dipakai bot (log error
-      # diambil otomatis dari step build yang gagal). Ini memotong total waktu
-      # build Native secara signifikan.
+      - name: Lint Project (best-effort)
+        working-directory: ${{ env.PROJECT_DIR }}/${{ env.GRADLE_DIR }}
+        run: |
+          echo "[RESULT_ANALYZE]"
+          ./gradlew lint > lint_report.txt 2>&1 || true
+          cat lint_report.txt
+          echo "[END_RESULT_ANALYZE]"
+          rm -f lint_report.txt
+        continue-on-error: true
 
       - name: Build APK (Native Gradle)
         working-directory: ${{ env.PROJECT_DIR }}/${{ env.GRADLE_DIR }}
@@ -133,28 +118,13 @@ jobs:
           if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
             ./gradlew assembleDebug --stacktrace
           else
-            # FIX: banyak project native gagal di assembleRelease hanya karena
-            # signing config release tidak lengkap. Kalau release gagal,
-            # OTOMATIS fallback ke assembleDebug supaya user tetap dapat APK
-            # (bukan langsung build FAILED).
-            if ! ./gradlew assembleRelease --stacktrace; then
-              echo ""
-              echo "⚠️⚠️⚠️ assembleRelease GAGAL (kemungkinan masalah signing config) ⚠️⚠️⚠️"
-              echo "🔁 Melakukan fallback ke assembleDebug agar user tetap mendapat APK..."
-              echo ""
-              ./gradlew assembleDebug --stacktrace
-            fi
+            ./gradlew assembleRelease --stacktrace
           fi
 
       - name: Check APK Output
         run: |
           APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          if [ -z "$APK_FOUND" ]; then
-            echo "❌ Tidak ada file .apk yang dihasilkan!"
-            exit 1
-          fi
           APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
-          echo "✅ APK ditemukan: $APK_PATH"
           echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
