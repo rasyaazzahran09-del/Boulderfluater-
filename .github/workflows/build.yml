@@ -88,23 +88,11 @@ jobs:
           java-version: "17"
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@main
         with:
-          # FIX: dulu pin ke "3.41.9" — kalau versi itu tidak ada di channel
-          # stable, setup GAGAL dan SEMUA build Flutter langsung error.
-          # Sekarang pakai stable terakhir (selalu ada) supaya setup tidak
-          # pernah 404.
+          flutter-version: "3.41.9"
           channel: "stable"
           cache: true
-
-      - name: Cache Gradle & Pub (percepat build berikutnya)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: flutterbuild-${{ runner.os }}-v1
-          restore-keys: flutterbuild-${{ runner.os }}-
 
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
@@ -139,17 +127,12 @@ jobs:
             flutter build apk --${{ github.event.inputs.build_type }}
           else
             GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
-            if [ -z "$GRADLE_PATH" ]; then
-              echo "❌ Bukan project Flutter (pubspec.yaml tidak ada) DAN gradlew tidak ditemukan!"
-              echo "❌ Pastikan ZIP berisi project Flutter atau Android Native (Gradle)."
-              exit 1
-            fi
             GRADLE_DIR=$(dirname "$GRADLE_PATH")
             cd "$GRADLE_DIR" && chmod +x gradlew
             if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
               ./gradlew assembleDebug
             else
-              ./gradlew assembleRelease || ./gradlew assembleDebug
+              ./gradlew assembleRelease
             fi
           fi
 
