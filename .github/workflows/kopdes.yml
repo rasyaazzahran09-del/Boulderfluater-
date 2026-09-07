@@ -1,5 +1,19 @@
 name: Build KopDes Simulator APK
 
+# ============================================================
+# Workflow KHUSUS project KopDes Simulator (libGDX + Gradle).
+# Dipicu bot via workflow_dispatch dengan input:
+#   zip_url    : URL ZIP project (hasil uploadZipToRelease di github.js)
+#   tag        : tag build unik per job
+#   build_type : debug / release
+#
+# Struktur project yang didukung (sesuai kopdes-simulator v1.0.0):
+#   settings.gradle  + gradlew  di root (modul: common, core, desktop, android, server)
+#   APK dihasilkan modul  :android  -> android/build/outputs/apk/...
+#   Release otomatis signed kunci debug bila keystore.properties tidak ada,
+#   sehingga assembleRelease SELALU menghasilkan APK yang bisa dipasang.
+# ============================================================
+
 on:
   workflow_dispatch:
     inputs:
@@ -22,21 +36,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
       - name: Download ZIP project
         run: |
           echo "=== Downloading ZIP ==="
           echo "URL: ${{ github.event.inputs.zip_url }}"
 
-          curl -L \
+          # --fail  : gagal bila HTTP error (4xx/5xx), tidak simpan body error sebagai zip
+          # --retry : tahan gangguan jaringan sesaat
+          curl -L --fail --retry 3 --retry-delay 3 \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
@@ -46,12 +55,19 @@ jobs:
           echo ""
           echo "=== File Info ==="
           ls -lh project.zip
+
+          # ZIP kosong/rusak -> gagal cepat dengan pesan jelas
+          MIN_SIZE=1000
+          ACTUAL_SIZE=$(stat -c%s project.zip)
+          if [ "$ACTUAL_SIZE" -lt "$MIN_SIZE" ]; then
+            echo "❌ ZIP terlalu kecil ($ACTUAL_SIZE byte) — download kemungkinan gagal."
+            cat project.zip || true
+            exit 1
+          fi
+
           echo ""
           echo "=== File Type ==="
           file project.zip
-          echo ""
-          echo "=== First Bytes ==="
-          xxd project.zip | head -2
 
       - name: Extract ZIP
         run: |
@@ -60,7 +76,7 @@ jobs:
             echo "❌ File bukan ZIP valid!"
             echo ""
             echo "=== Isi file ==="
-            cat project.zip
+            cat project.zip || true
             exit 1
           fi
           echo "✅ ZIP valid"
@@ -71,6 +87,7 @@ jobs:
 
           echo ""
           echo "=== Mengunci Project Dir ==="
+          # Kalau ZIP membungkus project dalam SATU folder, masuk ke folder itu.
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
 
@@ -80,39 +97,52 @@ jobs:
             PROJECT_DIR="project_raw"
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Project root: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR" | head -30
 
       - name: Validate KopDes Project
-        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           echo "=== Validasi project KopDes Simulator ==="
-          GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+
+          # gradlew bisa di root ZIP atau di dalam sub-folder — cari otomatis.
+          GRADLE_PATH=$(find "$PROJECT_DIR" -name "gradlew" -not -path "*/node_modules/*" | head -n 1)
 
           if [ -z "$GRADLE_PATH" ]; then
             echo "❌ gradlew tidak ditemukan. ZIP bukan project KopDes Simulator (libGDX/Gradle) yang valid."
-            echo "   Pastikan ZIP berisi settings.gradle + modul android/ dengan gradlew."
+            echo "   Pastikan ZIP berisi settings.gradle + gradlew + modul android/."
             exit 1
           fi
 
-          GRADLE_DIR=$(dirname "$GRADLE_PATH")
-          echo "✅ gradlew ditemukan di: $GRADLE_DIR"
-          echo "✅ Ini project Gradle yang valid (KopDes Simulator / libGDX)"
-          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
           chmod +x "$GRADLE_PATH"
+          GRADLE_DIR=$(cd "$(dirname "$GRADLE_PATH")" && pwd)   # ABSOLUTE path
+          echo "✅ gradlew ditemukan di: $GRADLE_DIR"
+          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
+
+          # Tandai modul android (kalau ada) supaya build menarget task yang tepat.
+          if [ -f "$GRADLE_DIR/android/build.gradle" ]; then
+            echo "✅ Modul android terdeteksi -> build :android:assemble*"
+            echo "HAS_ANDROID_MODULE=true" >> $GITHUB_ENV
+          else
+            echo "⚠️ Modul android tidak ditemukan -> build assemble* di root (fallback)"
+            echo "HAS_ANDROID_MODULE=false" >> $GITHUB_ENV
+          fi
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
           java-version: "17"
+          # Cache dependensi Gradle -> build kedua & berikutnya jauh lebih cepat
+          cache: "gradle"
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Analyze Project (best-effort)
-        working-directory: ${{ env.PROJECT_DIR }}/${{ env.GRADLE_DIR }}
+        working-directory: ${{ env.GRADLE_DIR }}
         run: |
           echo "[RESULT_ANALYZE]"
-          ./gradlew help > analyze_report.txt 2>&1 || true
+          ./gradlew help --stacktrace > analyze_report.txt 2>&1 || true
           cat analyze_report.txt
           echo "[END_RESULT_ANALYZE]"
           rm -f analyze_report.txt
@@ -123,33 +153,49 @@ jobs:
         run: exit 1
 
       - name: Build APK (KopDes Simulator Gradle)
-        working-directory: ${{ env.PROJECT_DIR }}/${{ env.GRADLE_DIR }}
+        working-directory: ${{ env.GRADLE_DIR }}
         run: |
-          if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
-            ./gradlew assembleDebug --stacktrace -x lint
+          # Target task yang TEPAT:
+          #   - Modul android ada  -> :android:assembleDebug/Release
+          #     (lebih cepat: desktop/server tidak ikut di-assemble)
+          #   - Tidak ada          -> assembleDebug/Release di root (fallback umum)
+          if [ "$HAS_ANDROID_MODULE" = "true" ]; then
+            TASK_PREFIX=":android:"
           else
-            ./gradlew assembleRelease --stacktrace -x lint
+            TASK_PREFIX=""
+          fi
+
+          if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+            ./gradlew ${TASK_PREFIX}assembleDebug --stacktrace -x lint
+          else
+            ./gradlew ${TASK_PREFIX}assembleRelease --stacktrace -x lint
           fi
 
       - name: Check APK Output
         run: |
-          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          # Cari SEMUA APK hasil build (release bisa bernama android-release.apk
+          # atau app-release.apk tergantung konfigurasi).
+          mapfile -t APK_LIST < <(find "$GITHUB_WORKSPACE" -name "*.apk" -not -path "*/intermediates/*")
 
-          if [ -z "$APK_FOUND" ]; then
+          if [ "${#APK_LIST[@]}" -eq 0 ]; then
             echo "❌ APK tidak ditemukan setelah build!"
+            echo "=== Struktur folder build ==="
+            find "$GITHUB_WORKSPACE" -maxdepth 4 -type d -name "apk" -o -maxdepth 4 -type d -name "outputs" | head
             exit 1
           fi
 
-          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
-          echo "=== APK ditemukan ==="
-          ls -lh "$APK_FOUND"
-          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "=== APK ditemukan (${#APK_LIST[@]}) ==="
+          mkdir -p apks
+          for apk in "${APK_LIST[@]}"; do
+            ls -lh "$apk"
+            # Salin semua APK ke satu folder supaya upload-artifact gampang
+            cp "$apk" apks/
+          done
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: kopdes-apk-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
-          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
+          path: apks/*.apk
           retention-days: 1
           if-no-files-found: error
