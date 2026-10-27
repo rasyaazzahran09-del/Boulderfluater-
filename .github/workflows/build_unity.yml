@@ -1,4 +1,4 @@
-name: Build Unity Android APK
+name: Build Unity APK
 
 on:
   workflow_dispatch:
@@ -13,366 +13,261 @@ on:
         description: "debug / release"
         required: true
         default: "release"
-      backend:
-        description: "scripting backend: il2cpp / mono"
-        required: false
-        default: "il2cpp"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+      UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+      UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.UNITY_ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASS: ${{ secrets.UNITY_ANDROID_KEYSTORE_PASS }}
+      ANDROID_KEYALIAS_NAME: ${{ secrets.UNITY_ANDROID_KEYALIAS_NAME }}
+      ANDROID_KEYALIAS_PASS: ${{ secrets.UNITY_ANDROID_KEYALIAS_PASS }}
 
     steps:
-      # ── 1. Bersihkan disk (image Unity Android ±5-6 GB + Library + IL2CPP butuh ruang besar) ──
-      - name: Bersihkan Disk (tampung image Unity + Library)
-        run: |
-          echo "=== Disk sebelum ==="
-          df -h / | tail -1
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/local/share/boost 2>/dev/null || true
-          sudo docker image prune --all --force > /dev/null 2>&1 || true
-          echo "=== Disk sesudah ==="
-          df -h / | tail -1
-
-      # ── 2. Setup Java (keytool untuk keystore) ──
-      - name: Setup Java (keytool)
-        uses: actions/setup-java@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          distribution: "temurin"
-          java-version: "17"
+          node-version: "24"
 
-      # ── 3. Download ZIP project ──
       - name: Download ZIP project
         run: |
+          echo "=== Downloading ZIP ==="
           echo "URL: ${{ github.event.inputs.zip_url }}"
+
           curl -L \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
             -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n"
-          ls -lh project.zip
-          file project.zip
+            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
 
-      # ── 4. Extract & kunci folder project ──
+          echo ""
+          echo "=== File Info ==="
+          ls -lh project.zip
+          echo ""
+          echo "=== File Type ==="
+          file project.zip
+          echo ""
+          echo "=== First Bytes ==="
+          xxd project.zip | head -2
+
       - name: Extract ZIP
         run: |
+          echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "❌ File bukan ZIP valid!"
-            head -c 300 project.zip
+            echo ""
+            echo "=== Isi file ==="
+            cat project.zip
             exit 1
           fi
           echo "✅ ZIP valid"
+
+          echo ""
+          echo "=== Extracting ZIP ==="
           unzip -q project.zip -d project_raw
-          SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
-          FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
-          if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
-            PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
-          else
-            PROJECT_DIR="project_raw"
+
+          echo ""
+          echo "=== Mengunci Project Dir (cari ProjectSettings/ProjectVersion.txt) ==="
+          PV_FILE=$(find project_raw -type f -path "*ProjectSettings/ProjectVersion.txt" | head -n 1)
+
+          if [ -z "$PV_FILE" ]; then
+            echo "❌ ProjectVersion.txt tidak ditemukan!"
+            echo "ZIP ini bukan project Unity yang valid."
+            echo "Struktur isi ZIP:"
+            find project_raw -maxdepth 3 -type d | head -30
+            exit 1
           fi
+
+          PROJECT_DIR=$(dirname "$(dirname "$PV_FILE")")
+          echo "✅ Project Unity ditemukan di: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          echo "✅ Folder project: $PROJECT_DIR"
 
-      # ── 5. Validasi project Unity + deteksi versi ──
-      - name: Validasi Project Unity
-        working-directory: ${{ env.PROJECT_DIR }}
+          # Bersihkan folder hasil editor yang tidak dibutuhkan CI (hemat ruang & waktu import)
+          echo "=== Membersihkan folder Library/Temp/Logs/Obj/Builds lama (jika ada) ==="
+          rm -rf "$PROJECT_DIR/Library" "$PROJECT_DIR/Temp" "$PROJECT_DIR/Logs" "$PROJECT_DIR/Obj" "$PROJECT_DIR/Builds" "$PROJECT_DIR/.gradle" || true
+
+      - name: Detect Unity Version
         run: |
-          if [ ! -f "ProjectSettings/ProjectVersion.txt" ]; then
-            echo "❌ Bukan project Unity! ProjectSettings/ProjectVersion.txt tidak ditemukan."
-            echo "Isi folder:"
-            ls -la
+          UNITY_VERSION=$(grep -oP '(?<=m_EditorVersion: ).*' "$PROJECT_DIR/ProjectSettings/ProjectVersion.txt" | tr -d '\r' | xargs)
+          if [ -z "$UNITY_VERSION" ]; then
+            echo "❌ Gagal membaca versi Unity dari ProjectVersion.txt"
             exit 1
           fi
-          UNITY_VER=$(grep -E '^m_EditorVersion:' ProjectSettings/ProjectVersion.txt | head -n1 | sed 's/m_EditorVersion:[[:space:]]*//' | tr -d '\r')
-          [ -z "$UNITY_VER" ] && UNITY_VER="2022.3.55f1"
-          echo "UNITY_VER=$UNITY_VER" >> $GITHUB_ENV
-          echo "✅ Project Unity terdeteksi — versi editor: $UNITY_VER"
+          echo "✅ Versi Unity project: $UNITY_VERSION"
+          echo "UNITY_VERSION=$UNITY_VERSION" >> $GITHUB_ENV
 
-      # ── 6. Cek secret lisensi (FAIL-FAST dengan petunjuk jelas) ──
-      - name: Cek Secret Lisensi Unity
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+      - name: Preflight Unity License
         run: |
-          if [ -n "$UNITY_SERIAL" ] && [ -n "$UNITY_EMAIL" ] && [ -n "$UNITY_PASSWORD" ]; then
-            echo "✅ Mode lisensi: PRO/PLATINUM (UNITY_SERIAL + email + password)"
-          elif [ -n "$UNITY_LICENSE" ]; then
-            echo "✅ Mode lisensi: Personal (UNITY_LICENSE/.ulf)"
+          echo "=== Cek Lisensi Unity ==="
+          if [ -n "$UNITY_LICENSE" ]; then
+            echo "✅ UNITY_LICENSE terdeteksi (lisensi personal/manual ULF)."
+          elif [ -n "$UNITY_EMAIL" ] && [ -n "$UNITY_PASSWORD" ] && [ -n "$UNITY_SERIAL" ]; then
+            echo "✅ Lisensi Pro terdeteksi (UNITY_EMAIL + UNITY_PASSWORD + UNITY_SERIAL)."
           else
+            echo "❌ LISENSI UNITY BELUM DIISI!"
             echo ""
-            echo "=============================================================="
-            echo "❌ SECRETS LISENSI UNITY BELUM DIISI DI REPO GITHUB INI!"
+            echo "Build Unity butuh sekret UNITY_LICENSE di repo GitHub worker."
             echo ""
-            echo "CARA PERBAIKI (sekali saja, ±5 menit):"
-            echo "1. Buka repo GitHub → Settings → Secrets and variables → Actions"
-            echo "2. Klik 'New repository secret', buat 3 secret berikut:"
+            echo "=== CARA SET (ADMIN) ==="
+            echo "1. Buka repo GitHub worker → Settings → Secrets and variables → Actions"
+            echo "2. Klik 'New repository secret'"
+            echo "3. Name   : UNITY_LICENSE"
+            echo "4. Value  : isi isi file lisensi manual (.alf yang sudah diaktivasi jadi ULF)"
+            echo "   Panduan: https://game.ci/docs/github/activation"
             echo ""
-            echo "   UNITY_EMAIL    → email akun Unity kamu"
-            echo "   UNITY_PASSWORD → password akun Unity"
-            echo "   UNITY_LICENSE  → isi file Unity_lic.ulf (lisensi Personal)"
-            echo ""
-            echo "CARA DAPAT Unity_lic.ulf (Personal/gratis):"
-            echo "   a. Install Unity Hub → login → Preferences → Licenses →"
-            echo "      Add → 'Get a free personal license'"
-            echo "   b. Buka file:"
-            echo "      Windows : C:\\ProgramData\\Unity\\Unity_lic.ulf"
-            echo "      Linux   : ~/.local/share/unity3d/Unity/Unity_lic.ulf"
-            echo "      macOS   : /Library/Application Support/Unity/Unity_lic.ulf"
-            echo "   c. Copy SELURUH isi file itu ke secret UNITY_LICENSE"
-            echo ""
-            echo "Detail lengkap: https://game.ci/docs/github/activation"
-            echo "=============================================================="
+            echo "Lisensi Personal Unity GRATIS. Setelah secret diisi, build ulang dari bot."
             exit 1
           fi
 
-      # ── 7. Keystore debug (APK SELALU ter-sign → selalu bisa di-install) ──
-      - name: Siapkan Keystore
-        id: keystore
+      - name: Free Disk Space (Anti 'No space left on device')
         run: |
-          mkdir -p ~/.android
-          KS="$HOME/.android/booyah_debug.keystore"
-          if [ ! -f "$KS" ]; then
-            keytool -genkeypair -v -keystore "$KS" \
-              -storepass android -keypass android \
-              -alias booyah -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Booyah Debug, OU=CI, O=Booyah, C=ID"
-          fi
-          echo "keystore_b64=$(base64 -w0 "$KS")" >> $GITHUB_OUTPUT
-          echo "✅ Keystore siap (debug, alias=booyah)"
+          echo "=== Sebelum pembersihan ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/lib/jvm/temurin-8-jdk-amd64 || true
+          sudo docker image prune -af || true
+          echo "=== Setelah pembersihan ==="
+          df -h /
 
-      # ── 8. Cache Library Unity (build ulang jauh lebih cepat) ──
-      - name: Cache Library Unity
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.PROJECT_DIR }}/Library
-          key: unity-lib-${{ env.UNITY_VER }}-${{ hashFiles(format('{0}/Packages/manifest.json', env.PROJECT_DIR)) }}
-          restore-keys: |
-            unity-lib-${{ env.UNITY_VER }}-
-
-      # ── 9. Tulis config build + injeksi script CI (idempotent) ──
-      - name: Tulis Config & Script CI Build
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Inject GameCI Build Script
         run: |
-          # Config build (dibaca script CI — hindari forwarding env ke docker)
-          cat > ci_build_config.json << 'CFG_EOF'
-          {
-            "buildType": "${{ github.event.inputs.build_type }}",
-            "backend": "${{ github.event.inputs.backend || 'il2cpp' }}",
-            "outRel": "build",
-            "outName": "CI_Build"
-          }
-          CFG_EOF
-          echo "✅ ci_build_config.json ditulis"
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          BUILD_NAME="UnityGame"
+          mkdir -p "$PROJECT_DIR/Assets/Editor"
 
-          # Script CI global (kompatibel SEMUA project Unity):
-          #   1) Kalau project punya pipeline CI sendiri (mis. PROJECT BOOYAH:
-          #      FFBR.EditorTools.CIAndroidBuild) → pakai itu (setup+generate
-          #      konten+build scene+APK, lewat refleksi).
-          #   2) Kalau project Unity biasa → konfigurasi Android + build semua
-          #      scene yang terdaftar di Build Settings (atau semua .unity).
-          mkdir -p Assets/Editor
-          cat > Assets/Editor/CIUnityAutoBuild.cs << 'CS_EOF'
-          // CIUnityAutoBuild.cs — di-inject otomatis oleh build_unity.yml (GitHub Actions).
-          // Entry: -executeMethod CIUnityAutoBuild.Build (GameCI unity-builder).
+          # Skrip build CI di-inject ke Assets/Editor (folder khusus editor —
+          # otomatis terkompilasi ke Assembly-CSharp-Editor tanpa perlu asmdef).
+          # Build type DIBAKIM ke dalam kode supaya tidak tergantung env docker.
+          cat > "$PROJECT_DIR/Assets/Editor/GameCIBuild.cs" << EOF
+          // Auto-generated by Web2Apk Pro Bot (Unity Build feature) - DO NOT EDIT
           using System;
           using System.IO;
           using System.Linq;
-          using System.Reflection;
-          using System.Text.RegularExpressions;
           using UnityEditor;
           using UnityEditor.Build.Reporting;
           using UnityEngine;
 
-          public static class CIUnityAutoBuild
+          public static class GameCIBuild
           {
-              public static void Build()
+              public static void PerformBuild()
               {
-                  bool ok = false;
-                  try
-                  {
-                      string projectRoot = Directory.GetParent(Application.dataPath).FullName;
-                      string buildType = Cfg(projectRoot, "buildType") ?? "release";
-                      string backend = Cfg(projectRoot, "backend") ?? "il2cpp";
-                      string outRel = Cfg(projectRoot, "outRel") ?? "build";
-                      string outName = Cfg(projectRoot, "outName") ?? "CI_Build";
-                      bool dev = buildType == "debug";
-                      Debug.Log("[CI] config: buildType=" + buildType + " backend=" + backend + " out=" + outRel);
+                  // 1. Kumpulkan scene: prioritas EditorBuildSettings, fallback semua scene di Assets
+                  string[] scenes = EditorBuildSettings.scenes
+                      .Where(s => s.enabled && !string.IsNullOrEmpty(s.path))
+                      .Select(s => s.path)
+                      .ToArray();
 
-                      // 1) PROJECT BOOYAH (punya pipeline CI sendiri di asmdef FFBR.Editor)
-                      if (TryInvokeBooyah()) return; // Exit dipanggil dari dalam
+                  if (scenes == null || scenes.Length == 0)
+                  {
+                      Debug.Log("[GameCI] EditorBuildSettings kosong - fallback ke semua scene di Assets/");
+                      scenes = AssetDatabase.FindAssets("t:Scene", new string[] { "Assets" })
+                          .Select(AssetDatabase.GUIDToAssetPath)
+                          .Where(p => !string.IsNullOrEmpty(p))
+                          .Distinct()
+                          .ToArray();
+                  }
 
-                      // 2) Project Unity generik
-                      ConfigureAndroid(backend, dev);
-                      var sceneList = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray();
-                      if (sceneList == null || sceneList.Length == 0)
-                          sceneList = AssetDatabase.FindAssets("t:Scene")
-                              .Select(AssetDatabase.GetAssetPath)
-                              .Where(p => !string.IsNullOrEmpty(p) && p.StartsWith("Assets/"))
-                              .Distinct().Take(16).ToArray();
-                      if (sceneList == null || sceneList.Length == 0)
-                          throw new Exception("Tidak ada scene (.unity) untuk di-build.");
-                      Debug.Log("[CI] Scenes: " + string.Join(", ", sceneList));
+                  if (scenes == null || scenes.Length == 0)
+                  {
+                      throw new Exception("[GameCI] Tidak ada scene untuk di-build. Pastikan project punya minimal 1 scene .unity");
+                  }
 
-                      string outDir = Path.Combine(projectRoot, outRel, "Android");
-                      Directory.CreateDirectory(outDir);
-                      string outPath = Path.Combine(outDir, outName + ".apk");
-                      if (File.Exists(outPath)) File.Delete(outPath);
+                  Debug.Log("[GameCI] Scene yang di-build (" + scenes.Length + "): " + string.Join(", ", scenes));
 
-                      var options = new BuildPlayerOptions
-                      {
-                          scenes = sceneList,
-                          locationPathName = outPath,
-                          target = BuildTarget.Android,
-                          options = dev ? BuildOptions.Development : BuildOptions.None
-                      };
-                      var report = BuildPipeline.BuildPlayer(options);
-                      ok = report.summary.result == BuildResult.Succeeded;
-                      Debug.Log("[CI] Build result: " + report.summary.result + " -> " + outPath +
-                                " size=" + (report.summary.totalSize / (1024 * 1024)) + " MB");
-                  }
-                  catch (Exception e)
+                  // 2. Setting build sesuai mode yang dipilih di bot
+                  string buildType = "$BUILD_TYPE";
+                  if (buildType == "debug")
                   {
-                      Debug.LogError("[CI] EXCEPTION: " + e);
-                      ok = false;
+                      EditorUserBuildSettings.development = true;
+                      EditorUserBuildSettings.connectProfiler = true;
+                      Debug.Log("[GameCI] Mode: DEBUG (development build)");
                   }
-                  finally
+                  else
                   {
-                      EditorApplication.Exit(ok ? 0 : 1);
+                      EditorUserBuildSettings.development = false;
+                      Debug.Log("[GameCI] Mode: RELEASE");
                   }
-              }
 
-              static bool TryInvokeBooyah()
-              {
-                  Type t = null;
-                  foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                  {
-                      t = asm.GetType("FFBR.EditorTools.CIAndroidBuild");
-                      if (t != null) break;
-                  }
-                  if (t == null) return false;
-                  var m = t.GetMethod("Build", BindingFlags.Public | BindingFlags.Static);
-                  if (m == null) return false;
-                  Debug.Log("[CI] Pipeline project terdeteksi: FFBR.EditorTools.CIAndroidBuild");
-                  try { m.Invoke(null, null); }
-                  catch (Exception e)
-                  {
-                      Debug.LogError("[CI] Pipeline project gagal: " + (e.InnerException ?? e).Message);
-                  }
-                  // Method ini selalu memanggil EditorApplication.Exit di finally.
-                  EditorApplication.Exit(1);
-                  return true;
-              }
+                  // APK (bukan .aab) supaya bisa langsung di-install
+                  EditorUserBuildSettings.buildAppBundle = false;
+                  EditorUserBuildSettings.androidBuildSystem = AndroidBuildSystem.Gradle;
 
-              static void ConfigureAndroid(string backend, bool dev)
-              {
-                  try
-                  {
-                      if (backend == "mono")
-                      {
-                          PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.Mono2x);
-                          PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARMv7;
-                          Debug.Log("[CI] Backend Mono (ARMv7)");
-                      }
-                      else
-                      {
-                          PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);
-                          PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARMv7 | AndroidArchitecture.ARM64;
-                          Debug.Log("[CI] Backend IL2CPP (ARMv7+ARM64)");
-                      }
-                      int minSdk = (int)PlayerSettings.Android.minSdkVersion;
-                      if (minSdk < 24) PlayerSettings.Android.minSdkVersion = (AndroidSdkVersions)24;
-                      PlayerSettings.Android.forceInternetPermission = true;
-                      EditorUserBuildSettings.buildAppBundle = false; // APK, bukan AAB
-                      EditorUserBuildSettings.development = dev;
-                      PlayerSettings.defaultInterfaceOrientation = UIOrientation.AutoRotation;
-                      PlayerSettings.allowedAutorotateToPortrait = false;
-                      PlayerSettings.allowedAutorotateToPortraitUpsideDown = false;
-                      PlayerSettings.allowedAutorotateToLandscapeLeft = true;
-                      PlayerSettings.allowedAutorotateToLandscapeRight = true;
-                  }
-                  catch (Exception e)
-                  {
-                      Debug.LogWarning("[CI] Konfigurasi Android parsial (lanjut): " + e.Message);
-                  }
-              }
+                  // 3. Output: <project>/build/Android/UnityGame.apk
+                  string output = "build/Android/$BUILD_NAME.apk";
+                  Directory.CreateDirectory(Path.GetDirectoryName(output));
 
-              static string Cfg(string projectRoot, string key)
-              {
-                  try
+                  var options = new BuildPlayerOptions
                   {
-                      string s = File.ReadAllText(Path.Combine(projectRoot, "ci_build_config.json"));
-                      var m = Regex.Match(s, "\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
-                      return m.Success ? m.Groups[1].Value : null;
+                      scenes = scenes,
+                      locationPathName = output,
+                      target = BuildTarget.Android,
+                      options = BuildOptions.None
+                  };
+
+                  BuildReport report = BuildPipeline.BuildPlayer(options);
+
+                  if (report.summary.result != BuildResult.Succeeded)
+                  {
+                      throw new Exception("[GameCI] Build GAGAL: result=" + report.summary.result +
+                          " errors=" + report.summary.totalErrors);
                   }
-                  catch { return null; }
+
+                  Debug.Log("[GameCI] Build SUKSES: " + report.summary.outputPath +
+                      " ukuran=" + (report.summary.totalSize / (1024 * 1024)) + " MB");
               }
           }
-          CS_EOF
-          echo "✅ Assets/Editor/CIUnityAutoBuild.cs siap"
+          EOF
 
-      # ── 10. Aktivasi lisensi (validasi awal; builder memvalidasi ulang) ──
-      - name: Aktivasi Lisensi Unity
-        continue-on-error: true
-        uses: game-ci/unity-activate@v2
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
-        with:
-          unityVersion: auto
-          projectPath: ${{ env.PROJECT_DIR }}
+          echo "✅ GameCIBuild.cs ter-inject (mode: $BUILD_TYPE)"
 
-      # ── 11. BUILD APK (GameCI unity-builder) ──
-      - name: Build APK (Unity via GameCI)
-        id: build
+          # Kalau admin isi keystore, decode ke file sekali di sini (opsional)
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$PROJECT_DIR/unity_keystore.keystore" || true
+            echo "✅ Keystore release ditemukan & di-decode."
+          else
+            echo "ℹ️ Keystore release tidak diisi — APK akan pakai debug-signature Unity (tetap bisa di-install)."
+          fi
+
+      - name: Build Unity APK (GameCI)
         uses: game-ci/unity-builder@v4
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
         with:
-          unityVersion: auto
+          unityVersion: ${{ env.UNITY_VERSION }}
           targetPlatform: Android
           projectPath: ${{ env.PROJECT_DIR }}
-          buildMethod: CIUnityAutoBuild.Build
+          buildName: UnityGame
           buildsPath: build
-          buildName: CI_Build
-          versioning: None
-          androidExportType: androidPackage
+          buildMethod: GameCIBuild.PerformBuild
+          allowDirtyBuild: true
           androidSymbolType: none
-          androidKeystoreName: booyah_debug.keystore
-          androidKeystoreBase64: ${{ steps.keystore.outputs.keystore_b64 }}
-          androidKeystorePass: android
-          androidKeyaliasName: booyah
-          androidKeyaliasPass: android
+          androidKeystoreName: unity_keystore.keystore
+          androidKeystoreBase64: ${{ secrets.UNITY_ANDROID_KEYSTORE_BASE64 }}
+          androidKeystorePass: ${{ secrets.UNITY_ANDROID_KEYSTORE_PASS }}
+          androidKeyaliasName: ${{ secrets.UNITY_ANDROID_KEYALIAS_NAME }}
+          androidKeyaliasPass: ${{ secrets.UNITY_ANDROID_KEYALIAS_PASS }}
 
-      # ── 12. Cari APK (glob seluruh workspace — anti "output tidak ketemu") ──
       - name: Check APK Output
         run: |
-          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" -not -path "*/Library/*" | head -n 1)
+          echo "=== Mencari hasil APK ==="
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+
           if [ -z "$APK_FOUND" ]; then
-            AAB_FOUND=$(find $GITHUB_WORKSPACE -name "*.aab" -not -path "*/Library/*" | head -n 1)
-            if [ -n "$AAB_FOUND" ]; then
-              echo "❌ Build menghasilkan AAB, bukan APK: $AAB_FOUND"
-              echo "→ Cek androidExportType (harus androidPackage) & EditorUserBuildSettings.buildAppBundle=false"
-            else
-              echo "❌ Tidak ada .apk / .aab di workspace. Cek log step Build APK."
-            fi
+            echo "❌ APK tidak ditemukan setelah build selesai!"
+            find $GITHUB_WORKSPACE/build -type f 2>/dev/null | head -30 || true
             exit 1
           fi
+
           APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
-          echo "✅ APK ditemukan: $APK_PATH ($(du -h "$APK_FOUND" | cut -f1))"
+          echo "✅ APK ditemukan: $APK_PATH"
+          ls -lh "$APK_FOUND"
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
-      # ── 13. Upload artifact (nama mengandung 'apk' — dicari otomatis oleh bot) ──
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
